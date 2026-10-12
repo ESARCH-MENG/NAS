@@ -688,7 +688,7 @@ class NasTool:
         )
         shell.pack(fill="both", expand=True, padx=14, pady=12)
         content = shell.inner
-        content.columnconfigure(0, weight=1, minsize=190)
+        content.columnconfigure(0, weight=1, minsize=220)
         content.columnconfigure(1, weight=2, minsize=330)
         content.columnconfigure(2, weight=1, minsize=260)
         content.rowconfigure(2, weight=1, minsize=210)
@@ -904,13 +904,22 @@ class NasTool:
             fg=TEXT,
             font=("Consolas", 15, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(2, 12))
+        folder_buttons = tk.Frame(side_content, bg=PANEL)
+        folder_buttons.grid(row=1, column=0, sticky="w")
         RoundedButton(
-            side_content,
+            folder_buttons,
             "SELECT FOLDER",
             lambda: self._select_folder(bank),
-            width=152,
+            width=90,
             height=34,
-        ).grid(row=1, column=0, sticky="w")
+        ).pack(side="left")
+        RoundedButton(
+            folder_buttons,
+            "OPEN FOLDER",
+            lambda: self._open_folder(bank),
+            width=90,
+            height=34,
+        ).pack(side="left", padx=(6, 0))
         path_label = tk.Label(
             side_content,
             text="No folder selected",
@@ -1061,6 +1070,28 @@ class NasTool:
         self.bank_paths[bank] = path
         self.path_labels[bank].configure(text=str(path))
         self._clear_results()
+
+    def _open_folder(self, bank: str) -> None:
+        path = self.bank_paths[bank]
+        if path is None:
+            messagebox.showinfo(
+                "No Folder Selected", f"Select a folder for Bank-{bank} first."
+            )
+            return
+        if not path.is_dir():
+            messagebox.showerror(
+                "Folder Unavailable", f"The selected Bank-{bank} folder is unavailable:\n{path}"
+            )
+            return
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=True)
+            elif os.name == "nt":
+                os.startfile(str(path))
+            else:
+                subprocess.run(["xdg-open", str(path)], check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            messagebox.showerror("Open Folder Failed", str(error))
 
     def _get_roots(self) -> tuple[Path, Path]:
         root_a = self.bank_paths["A"]

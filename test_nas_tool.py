@@ -7,7 +7,7 @@ import tkinter as tk
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from PIL import Image
 
@@ -558,6 +558,29 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(restored.bank_paths, {"A": self.a, "B": self.b})
         finally:
             window.destroy()
+
+    def test_open_folder_uses_selected_bank_path(self) -> None:
+        app = NasTool.__new__(NasTool)
+        app.bank_paths = {"A": self.a, "B": self.b}
+        with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.subprocess.run"
+        ) as open_command:
+            app._open_folder("A")
+            app._open_folder("B")
+        self.assertEqual(
+            open_command.call_args_list,
+            [call(["open", str(self.a)], check=True), call(["open", str(self.b)], check=True)],
+        )
+
+        app.bank_paths["A"] = None
+        with patch("nas_tool.messagebox.showinfo") as info, patch(
+            "nas_tool.subprocess.run"
+        ) as open_command:
+            app._open_folder("A")
+        info.assert_called_once_with(
+            "No Folder Selected", "Select a folder for Bank-A first."
+        )
+        open_command.assert_not_called()
 
     def test_schedule_failure_does_not_leave_worker_enabled(self) -> None:
         save_settings(self.path, Settings(str(self.a), str(self.b)))

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Build NAS Tool.app and package it as a macOS DMG on the Desktop."""
 
 from __future__ import annotations
