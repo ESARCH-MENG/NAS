@@ -542,14 +542,14 @@ class NasToolFileOperationTests(unittest.TestCase):
             return_value=subprocess.CompletedProcess([], 0, "", ""),
         ) as run:
             open_image_capture(self.bank_a)
-            self.assertEqual(run.call_args_list[0].args[0],
-                             ["/usr/bin/open", "-b", "com.apple.Image_Capture"])
-            automation = run.call_args_list[1]
+            run.assert_called_once()
+            automation = run.call_args
             self.assertEqual(automation.args[0][:2], ["/usr/bin/osascript", "-e"])
             self.assertEqual(automation.args[0][3:], [str(self.bank_a.resolve())])
             self.assertIn("on run argv", automation.args[0][2])
+            self.assertIn("tell application id \"com.apple.Image_Capture\" to activate", automation.args[0][2])
             self.assertIn("keystroke destinationPath", automation.args[0][2])
-            self.assertEqual(automation.kwargs["timeout"], 45)
+            self.assertEqual(automation.kwargs["timeout"], 90)
 
     def test_image_capture_reports_destination_errors(self) -> None:
         for failure in (
@@ -558,7 +558,7 @@ class NasToolFileOperationTests(unittest.TestCase):
         ):
             with self.subTest(failure=failure), patch("nas_tool.sys.platform", "darwin"), patch(
                 "nas_tool.subprocess.run",
-                side_effect=[subprocess.CompletedProcess([], 0, "", ""), failure],
+                side_effect=[failure],
             ):
                 with self.assertRaises(OSError):
                     open_image_capture(self.bank_a)
@@ -665,14 +665,32 @@ class NasToolFileOperationTests(unittest.TestCase):
             app = NasTool(window, self.base / "settings.json")
             app.bank_paths["A"] = self.bank_a
             with patch(
-                "nas_tool.open_image_capture", side_effect=OSError("Destination not set")
+                "nas_tool.open_image_capture",
+                side_effect=OSError(
+                    "287:381: execution error: Allow NAS Tool (or its Python host) "
+                    "in System Settings > Privacy & Security > Accessibility. (-2700)"
+                ),
             ), patch("nas_tool.messagebox.showinfo") as info, patch(
                 "nas_tool.messagebox.showerror"
-            ) as error:
+            ) as error, patch(
+                "nas_tool.subprocess.run"
+            ) as launch_settings:
                 app._upload()
                 wait_for_task(window, app)
             info.assert_not_called()
-            error.assert_called_once_with("Download Failed", "Destination not set")
+            error.assert_called_once_with(
+                "Download Failed",
+                "287:381: execution error: Allow NAS Tool (or its Python host) "
+                "in System Settings > Privacy & Security > Accessibility. (-2700)",
+            )
+            launch_settings.assert_called_once_with(
+                [
+                    "/usr/bin/open",
+                    "x-apple.systempreferences:com.apple.Accessibility-Settings.extension",
+                ],
+                check=False,
+                timeout=10,
+            )
             self.assertFalse(app._image_capture_active)
         finally:
             window.destroy()

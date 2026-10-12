@@ -766,6 +766,7 @@ IMAGE_CAPTURE_DESTINATION_SCRIPT = """
 on run argv
     set destinationPath to item 1 of argv
     set destinationName to name of (info for (POSIX file destinationPath))
+    tell application id "com.apple.Image_Capture" to activate
     tell application "System Events"
         if not UI elements enabled then
             error "Allow NAS Tool (or its Python host) in System Settings > Privacy & Security > Accessibility."
@@ -779,6 +780,7 @@ on run argv
         end if
         tell (first application process whose bundle identifier is "com.apple.Image_Capture")
             set frontmost to true
+            delay 0.5
             repeat 100 times
                 if exists window 1 then exit repeat
                 delay 0.1
@@ -828,6 +830,7 @@ on run argv
                 delay 0.1
             end repeat
             if not (exists sheet 1 of sheet 1 of window 1) then error "Cannot open Go to Folder in Image Capture."
+            delay 0.3
             keystroke "a" using command down
             keystroke destinationPath
             key code 36
@@ -859,25 +862,25 @@ def open_image_capture(bank_a: Path) -> None:
     bank_a = bank_a.expanduser().resolve()
     if not bank_a.is_dir():
         raise ValueError(f"Bank-A folder does not exist or cannot be accessed: {bank_a}")
-    for arguments in (
-        ["/usr/bin/open", "-b", "com.apple.Image_Capture"],
-        ["/usr/bin/osascript", "-e", IMAGE_CAPTURE_DESTINATION_SCRIPT, str(bank_a)],
-    ):
-        try:
-            result = subprocess.run(
-                arguments, capture_output=True, text=True, check=False, timeout=45
-            )
-        except subprocess.TimeoutExpired as error:
-            raise OSError(
-                "Timed out setting the Image Capture destination. Check macOS "
-                "Accessibility/Automation permissions, select your device in "
-                "Image Capture, and click Download in NAS Tool again."
-            ) from error
-        if result.returncode:
-            raise OSError(
-                result.stderr.strip() or result.stdout.strip()
-                or f"Unable to set Image Capture destination to Bank-A (exit {result.returncode})."
-            )
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-e", IMAGE_CAPTURE_DESTINATION_SCRIPT, str(bank_a)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=90,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OSError(
+            "Timed out setting the Image Capture destination. Check macOS "
+            "Accessibility/Automation permissions, select your device in "
+            "Image Capture, and click Download in NAS Tool again."
+        ) from error
+    if result.returncode:
+        raise OSError(
+            result.stderr.strip() or result.stdout.strip()
+            or f"Unable to set Image Capture destination to Bank-A (exit {result.returncode})."
+        )
 
 
 def stop_image_capture() -> None:
@@ -898,6 +901,22 @@ def stop_image_capture() -> None:
             result.stderr.strip() or result.stdout.strip()
             or f"Unable to stop Image Capture (exit {result.returncode})."
         )
+
+
+def open_accessibility_settings() -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(
+            [
+                "/usr/bin/open",
+                "x-apple.systempreferences:com.apple.Accessibility-Settings.extension",
+            ],
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 class ToggleSwitch(tk.Canvas):
@@ -1208,6 +1227,8 @@ class NasTool:
             if self._task_clear_on_error:
                 self._clear_results()
             messagebox.showerror(self._task_error_title, str(payload))
+            if "Allow NAS Tool (or its Python host)" in str(payload):
+                open_accessibility_settings()
 
     def _stop(self) -> None:
         if self._task_thread is not None and self._task_thread.is_alive():
