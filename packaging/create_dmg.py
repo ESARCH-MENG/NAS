@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,39 @@ def _temporary_image_path(output: Path) -> Path:
     return path
 
 
+def _ask_app_version() -> str:
+    import tkinter as tk
+    from tkinter import simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        version = simpledialog.askstring(
+            "NAS Tool Version",
+            "Enter the version number for NAS Tool:",
+            initialvalue="1.0",
+            parent=root,
+        )
+    finally:
+        root.destroy()
+
+    if version is None:
+        raise RuntimeError("DMG creation was canceled.")
+    return version.strip() or "1.0"
+
+
+def _set_app_version(app: Path, version: str) -> None:
+    info_plist = app / "Contents" / "Info.plist"
+    contents = info_plist.read_bytes()
+    metadata = plistlib.loads(contents)
+    metadata["CFBundleShortVersionString"] = version
+    metadata["CFBundleVersion"] = version
+    plist_format = (
+        plistlib.FMT_BINARY if contents.startswith(b"bplist00") else plistlib.FMT_XML
+    )
+    info_plist.write_bytes(plistlib.dumps(metadata, fmt=plist_format))
+
+
 def build_dmg(output: Path, replace_existing: bool = False) -> None:
     if sys.platform != "darwin":
         raise RuntimeError("DMG creation is supported on macOS only.")
@@ -62,6 +96,7 @@ def build_dmg(output: Path, replace_existing: bool = False) -> None:
     if output.is_dir():
         raise IsADirectoryError(f"DMG output path is a directory: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
+    app_version = _ask_app_version()
 
     temporary_image: Path | None = None
     try:
