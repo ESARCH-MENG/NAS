@@ -379,7 +379,7 @@ class SettingsTests(unittest.TestCase):
                 app._select_folder("B")
             self.assertEqual(load_settings(self.path).bank_a, str(self.a.resolve()))
             restored = NasTool(tk.Toplevel(window), self.path)
-            self.assertEqual(restored.bank_paths, {"A": self.a, "B": self.b})
+            self.assertEqual(restored.bank_paths, {"A": self.a.resolve(), "B": self.b.resolve()})
         finally:
             window.destroy()
 
