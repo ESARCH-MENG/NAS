@@ -781,22 +781,23 @@ def upload_to_bank_a(
 
 
 IMAGE_CAPTURE_DESTINATION_SCRIPT = """
-on run argv
-    set destinationPath to item 1 of argv
-    set destinationName to name of (info for (POSIX file destinationPath))
-    tell application id "com.apple.Image_Capture" to activate
+set destinationPath to system attribute "NAS_TOOL_IMAGE_CAPTURE_DESTINATION"
+set destinationName to name of (info for (POSIX file destinationPath))
     tell application "System Events"
-        if not UI elements enabled then
-            error "Allow NAS Tool (or its Python host) in System Settings > Privacy & Security > Accessibility."
-        end if
+        set captureProcess to missing value
         repeat 100 times
-            if exists (first application process whose bundle identifier is "com.apple.Image_Capture") then exit repeat
+            try
+                set captureProcess to first application process whose bundle identifier is "com.apple.Image_Capture"
+            on error
+                set captureProcess to missing value
+            end try
+            if captureProcess is not missing value then exit repeat
             delay 0.1
         end repeat
-        if not (exists (first application process whose bundle identifier is "com.apple.Image_Capture")) then
+        if captureProcess is missing value then
             error "Image Capture did not start."
         end if
-        tell (first application process whose bundle identifier is "com.apple.Image_Capture")
+        tell captureProcess
             set frontmost to true
             delay 0.5
             repeat 100 times
@@ -870,8 +871,25 @@ on run argv
             end if
         end tell
     end tell
-end run
 """
+
+
+def execute_applescript(script_source: str) -> None:
+    if sys.platform != "darwin":
+        raise ValueError("AppleScript is available on macOS only.")
+    try:
+        from Foundation import NSAppleScript
+    except ImportError as error:
+        raise OSError(
+            "The macOS AppleScript bridge is missing. Reinstall NAS Tool from its DMG."
+        ) from error
+
+    script = NSAppleScript.alloc().initWithSource_(script_source)
+    if script is None:
+        raise OSError("Unable to compile the AppleScript automation script.")
+    _result, error = script.executeAndReturnError_(None)
+    if error:
+        raise OSError(str(error.get("NSAppleScriptErrorMessage") or error))
 
 
 def request_system_events_automation() -> None:
@@ -970,44 +988,36 @@ def open_image_capture(bank_a: Path) -> None:
         raise ValueError(f"Bank-A folder does not exist or cannot be accessed: {bank_a}")
     request_system_events_automation()
     try:
-        result = subprocess.run(
-            ["/usr/bin/osascript", "-e", IMAGE_CAPTURE_DESTINATION_SCRIPT, str(bank_a)],
+        launch = subprocess.run(
+            ["/usr/bin/open", "-a", "Image Capture"],
             capture_output=True,
             text=True,
             check=False,
-            timeout=90,
+            timeout=10,
         )
     except subprocess.TimeoutExpired as error:
+        raise OSError("Timed out launching Image Capture.") from error
+    if launch.returncode:
         raise OSError(
-            "Timed out setting the Image Capture destination. Check macOS "
-            "Accessibility/Automation permissions, select your device in "
-            "Image Capture, and click Download in NAS Tool again."
-        ) from error
-    if result.returncode:
-        raise OSError(
-            result.stderr.strip() or result.stdout.strip()
-            or f"Unable to set Image Capture destination to Bank-A (exit {result.returncode})."
+            launch.stderr.strip() or launch.stdout.strip()
+            or f"Unable to launch Image Capture (exit {launch.returncode})."
         )
+    environment_key = "NAS_TOOL_IMAGE_CAPTURE_DESTINATION"
+    previous_destination = os.environ.get(environment_key)
+    os.environ[environment_key] = str(bank_a)
+    try:
+        execute_applescript(IMAGE_CAPTURE_DESTINATION_SCRIPT)
+    finally:
+        if previous_destination is None:
+            os.environ.pop(environment_key, None)
+        else:
+            os.environ[environment_key] = previous_destination
 
 
 def stop_image_capture() -> None:
     if sys.platform != "darwin":
         raise ValueError("Image Capture is available on macOS only.")
-    result = subprocess.run(
-        [
-            "/usr/bin/osascript",
-            "-e",
-            'tell application "Image Capture" to quit',
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode:
-        raise OSError(
-            result.stderr.strip() or result.stdout.strip()
-            or f"Unable to stop Image Capture (exit {result.returncode})."
-        )
+    execute_applescript('tell application "Image Capture" to quit')
 
 
 def open_accessibility_settings() -> None:
@@ -1381,20 +1391,32 @@ class NasTool:
                     open_automation_settings()
                 except (OSError, ValueError) as error:
                     error_message += f"\n\nCould not open settings automatically: {error}"
-            if "Allow NAS Tool (or its Python host)" in error_message:
-                error_message += (
-                    "\n\nOpen System Settings > Privacy & Security > Accessibility "
-                    "(the privacy permission list, not the main Accessibility page).\n"
-                    "Enable the app that launches NAS Tool: NAS Tool for an app "
-                    "bundle, Terminal/iTerm for a terminal launch, or Visual Studio "
-                    "Code for a VS Code launch. Use the app named by macOS if "
-                    "it identifies a different host.\n"
-                    "If the app is absent, click + and add that application. "
-                    "Unlock the settings if required, then quit and reopen the "
-                    "launching app and NAS Tool. Click Download again.\n"
-                    "Allow Automation access to System Events and Image Capture "
-                    "if macOS prompts for it."
-                )
+            if (
+                "Allow NAS Tool (or its Python host)" in error_message
+                or "not allowed assistive access" in error_message.lower()
+            ):
+                if "not allowed assistive access" in error_message.lower():
+                    error_message += (
+                        "\n\nOpen System Settings > Privacy & Security > Accessibility "
+                        "and enable the current NAS Tool.app. If an older NAS Tool "
+                        "entry is already enabled, remove that entry, click +, and "
+                        "add the NAS Tool.app you are currently launching. Quit and "
+                        "reopen NAS Tool, then click Download again."
+                    )
+                else:
+                    error_message += (
+                        "\n\nOpen System Settings > Privacy & Security > Accessibility "
+                        "(the privacy permission list, not the main Accessibility page).\n"
+                        "Enable the app that launches NAS Tool: NAS Tool for an app "
+                        "bundle, Terminal/iTerm for a terminal launch, or Visual Studio "
+                        "Code for a VS Code launch. Use the app named by macOS if "
+                        "it identifies a different host.\n"
+                        "If the app is absent, click + and add that application. "
+                        "Unlock the settings if required, then quit and reopen the "
+                        "launching app and NAS Tool. Click Download again.\n"
+                        "Allow Automation access to System Events and Image Capture "
+                        "if macOS prompts for it."
+                    )
                 try:
                     open_accessibility_settings()
                 except (OSError, ValueError) as error:

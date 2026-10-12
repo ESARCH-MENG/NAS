@@ -1,3 +1,5 @@
+import os
+import os
 import tempfile
 import subprocess
 import json
@@ -18,6 +20,8 @@ from nas_tool import (
     NasTool,
     EmergencyStopButton,
     HELP_TEXT,
+    IMAGE_CAPTURE_DESTINATION_SCRIPT,
+    execute_applescript,
     OperationCancelled,
     ToggleSwitch,
     compare_directories,
@@ -540,35 +544,74 @@ class NasToolFileOperationTests(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_execute_applescript_runs_in_the_current_app_process(self) -> None:
+        script = Mock()
+        foundation = Mock()
+        foundation.NSAppleScript.alloc.return_value.initWithSource_.return_value = script
+        script.executeAndReturnError_.return_value = (None, None)
+
+        with patch("nas_tool.sys.platform", "darwin"), patch.dict(
+            sys.modules, {"Foundation": foundation}
+        ):
+            execute_applescript("return 1")
+
+        foundation.NSAppleScript.alloc.return_value.initWithSource_.assert_called_once_with(
+            "return 1"
+        )
+        script.executeAndReturnError_.assert_called_once_with(None)
+
+    def test_execute_applescript_reports_foundation_error(self) -> None:
+        script = Mock()
+        foundation = Mock()
+        foundation.NSAppleScript.alloc.return_value.initWithSource_.return_value = script
+        script.executeAndReturnError_.return_value = (
+            None,
+            {"NSAppleScriptErrorMessage": "Automation denied"},
+        )
+
+        with patch("nas_tool.sys.platform", "darwin"), patch.dict(
+            sys.modules, {"Foundation": foundation}
+        ), self.assertRaisesRegex(OSError, "Automation denied"):
+            execute_applescript("return 1")
+
     def test_image_capture_sets_bank_a_as_import_destination(self) -> None:
+        destination_during_execution: list[str | None] = []
         with patch("nas_tool.sys.platform", "darwin"), patch(
             "nas_tool.request_system_events_automation"
         ) as request_access, patch(
             "nas_tool.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, "", ""),
-        ) as run:
+        ) as run, patch(
+            "nas_tool.execute_applescript",
+            side_effect=lambda _script: destination_during_execution.append(
+                os.environ.get("NAS_TOOL_IMAGE_CAPTURE_DESTINATION")
+            ),
+        ) as execute:
             open_image_capture(self.bank_a)
             request_access.assert_called_once_with()
-            run.assert_called_once()
-            automation = run.call_args
-            self.assertEqual(automation.args[0][:2], ["/usr/bin/osascript", "-e"])
-            self.assertEqual(automation.args[0][3:], [str(self.bank_a.resolve())])
-            self.assertIn("on run argv", automation.args[0][2])
-            self.assertIn("tell application id \"com.apple.Image_Capture\" to activate", automation.args[0][2])
-            self.assertIn("keystroke destinationPath", automation.args[0][2])
-            self.assertEqual(automation.kwargs["timeout"], 90)
+            run.assert_called_once_with(
+                ["/usr/bin/open", "-a", "Image Capture"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            execute.assert_called_once_with(IMAGE_CAPTURE_DESTINATION_SCRIPT)
+            self.assertEqual(destination_during_execution, [str(self.bank_a.resolve())])
+            self.assertNotIn("NAS_TOOL_IMAGE_CAPTURE_DESTINATION", os.environ)
+            self.assertNotIn("osascript", execute.call_args.args[0])
+            self.assertIn("set captureProcess to first application process", execute.call_args.args[0])
+            self.assertIn("tell captureProcess", execute.call_args.args[0])
+            self.assertIn("keystroke destinationPath", execute.call_args.args[0])
 
     def test_image_capture_reports_destination_errors(self) -> None:
-        for failure in (
-            subprocess.CompletedProcess([], 1, "", "Accessibility permission required"),
-            subprocess.TimeoutExpired("osascript", 45),
-        ):
-            with self.subTest(failure=failure), patch("nas_tool.sys.platform", "darwin"), patch(
-                "nas_tool.request_system_events_automation"
-            ), patch(
-                "nas_tool.subprocess.run",
-                side_effect=[failure],
-            ):
+        failure = OSError("System Events automation denied")
+        with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.request_system_events_automation"
+        ), patch(
+            "nas_tool.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ), patch("nas_tool.execute_applescript", side_effect=failure):
                 with self.assertRaises(OSError):
                     open_image_capture(self.bank_a)
 
@@ -580,17 +623,17 @@ class NasToolFileOperationTests(unittest.TestCase):
         ), patch(
             "nas_tool.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, "", ""),
-        ) as run:
+        ), patch("nas_tool.execute_applescript") as execute:
             open_image_capture(bank)
-        self.assertEqual(run.call_args_list[-1].args[0][-1], str(bank.resolve()))
-        self.assertNotIn(str(bank.resolve()), run.call_args_list[-1].args[0][2])
+        execute.assert_called_once_with(IMAGE_CAPTURE_DESTINATION_SCRIPT)
+        self.assertNotIn(str(bank.resolve()), execute.call_args.args[0])
 
     def test_image_capture_rejects_missing_folder_and_reports_launch_errors(self) -> None:
         with patch("nas_tool.sys.platform", "darwin"), patch(
             "nas_tool.request_system_events_automation"
         ), patch(
             "nas_tool.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 1, "", "App unavailable"),
+            side_effect=[subprocess.CompletedProcess([], 1, "", "App unavailable")],
         ) as run:
             with self.assertRaises(ValueError):
                 open_image_capture(self.base / "missing")
@@ -644,20 +687,10 @@ class NasToolFileOperationTests(unittest.TestCase):
 
     def test_stop_image_capture_quits_the_macos_app(self) -> None:
         with patch("nas_tool.sys.platform", "darwin"), patch(
-            "nas_tool.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 0, "", ""),
-        ) as run:
+            "nas_tool.execute_applescript"
+        ) as execute:
             stop_image_capture()
-        run.assert_called_once_with(
-            [
-                "/usr/bin/osascript",
-                "-e",
-                'tell application "Image Capture" to quit',
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        execute.assert_called_once_with('tell application "Image Capture" to quit')
 
     def test_upload_without_source_uses_image_capture(self) -> None:
         window = tk.Tk()
@@ -747,6 +780,30 @@ class NasToolFileOperationTests(unittest.TestCase):
                 timeout=10,
             )
             self.assertFalse(app._image_capture_active)
+        finally:
+            window.destroy()
+
+    def test_assistive_access_denial_opens_settings_for_current_app(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths["A"] = self.bank_a
+            with patch(
+                "nas_tool.open_image_capture",
+                side_effect=OSError(
+                    "System Events got an error: NAS Tool is not allowed assistive access. (-25211)"
+                ),
+            ), patch("nas_tool.open_accessibility_settings") as open_settings, patch(
+                "nas_tool.messagebox.showerror"
+            ) as error:
+                app._upload()
+                wait_for_task(window, app)
+
+            open_settings.assert_called_once_with()
+            message = error.call_args.args[1]
+            self.assertIn("current NAS Tool.app", message)
+            self.assertIn("remove that entry, click +", message)
+            self.assertIn("-25211", message)
         finally:
             window.destroy()
 
@@ -928,7 +985,18 @@ class PackagingTests(unittest.TestCase):
             run.call_args_list,
             [
                 call(
-                    ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(app)],
+                    [
+                        "/usr/bin/codesign",
+                        "--force",
+                        "--deep",
+                        "--sign",
+                        "-",
+                        "--identifier",
+                        "com.marvel.nas-tool",
+                        "--requirements",
+                        '=designated => identifier "com.marvel.nas-tool"',
+                        str(app),
+                    ],
                     check=True,
                 ),
                 call(

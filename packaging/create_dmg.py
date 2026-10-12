@@ -17,6 +17,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 APP_NAME = "NAS Tool"
+APP_BUNDLE_IDENTIFIER = "com.marvel.nas-tool"
 APP_ICON = PROJECT_ROOT / "packaging" / "assets" / "app_icon.icns"
 DMG_NAME = "NAS-Tool.dmg"
 
@@ -86,7 +87,18 @@ def _sign_app(app: Path) -> None:
     if codesign is None:
         raise RuntimeError("The macOS codesign command is required to sign the app bundle.")
     subprocess.run(
-        [codesign, "--force", "--deep", "--sign", "-", str(app)],
+        [
+            codesign,
+            "--force",
+            "--deep",
+            "--sign",
+            "-",
+            "--identifier",
+            APP_BUNDLE_IDENTIFIER,
+            "--requirements",
+            f'=designated => identifier "{APP_BUNDLE_IDENTIFIER}"',
+            str(app),
+        ],
         check=True,
     )
     subprocess.run(
@@ -114,6 +126,18 @@ def build_dmg(output: Path, replace_existing: bool = False) -> None:
         raise RuntimeError("Python was built without Tkinter support.")
     if importlib.util.find_spec("PIL") is None:
         raise RuntimeError("Install project dependencies first: python3 -m pip install -r requirements.txt")
+    if importlib.util.find_spec("Foundation") is None:
+        raise RuntimeError(
+            "Install project dependencies first: python3 -m pip install -r requirements.txt"
+        )
+    if importlib.util.find_spec("Foundation") is None:
+        raise RuntimeError(
+            "Install project dependencies first: python3 -m pip install -r requirements.txt"
+        )
+    if importlib.util.find_spec("Foundation") is None:
+        raise RuntimeError(
+            "Install project dependencies first: python3 -m pip install -r requirements.txt"
+        )
     if not APP_ICON.is_file():
         raise RuntimeError(f"App icon not found: {APP_ICON}")
 
@@ -144,7 +168,7 @@ def build_dmg(output: Path, replace_existing: bool = False) -> None:
                     "--icon",
                     str(APP_ICON),
                     "--osx-bundle-identifier",
-                    "com.marvel.nas-tool",
+                    APP_BUNDLE_IDENTIFIER,
                     "--distpath",
                     str(dist),
                     "--workpath",

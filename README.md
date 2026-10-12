@@ -51,7 +51,7 @@ There is no bottom status bar; errors and warnings are shown in dialogs.
 
 If no upload folder is selected, **Download** on macOS opens the system
 **Image Capture** app and sets **Import To > Other...** to Bank-A using macOS
-UI automation. Connect and select your device first. Grant **Accessibility**
+UI automation executed inside NAS Tool. Connect and select your device first. Grant **Accessibility**
 access to NAS Tool (or its Python/terminal host) in **System Settings > Privacy &
 Security**, and allow **Automation** access to System Events when prompted.
 Use **Privacy & Security > Accessibility** (Chinese: **隐私与安全性 > 辅助功能**),
