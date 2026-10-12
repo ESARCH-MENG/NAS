@@ -10,13 +10,26 @@ python3 -m pip install -r requirements.txt
 python3 nas_tool.py
 ```
 
+Open **Help > User Guide** or press **F1** for an English summary of all
+controls, workflows, and interaction rules.
+
 Compare lists files found only in Bank-A or only in Bank-B. Selecting a result
 previews that file. Sync copies new or changed files from A to B; it does not
 delete extra files in B. Delete Selected permanently deletes selected results
 after confirmation.
+Each Bank panel keeps its equal-sized **Select Folder** and **Open Folder**
+buttons in one row at the bottom-right, with Select on the left and Open on the
+right, so their labels remain fully visible.
 The bottom controls align with the three UI columns: **Sync** is centered on
 the left, **Compare** in the middle, and **Sync Selected** / **Delete Selected**
 are centered together on the right, in that order.
+The bottom-right **Stop** control matches Storm's 44 px circular emergency
+button and triggers on mouse-down. It first signals any active **Sync**,
+**Sync Selected**, or folder **Download** to stop. Partial new files are removed,
+and an existing destination is replaced only after a complete copy, so stopping
+does not leave a truncated replacement. During a macOS Image Capture import,
+**Stop** quits Image Capture. Clicking **Stop** while idle does nothing and does
+not close NAS Tool.
 Both selected-file buttons keep their normal colors at all times. Clicking
 either without a selection shows a dialog asking you to select Compare results;
 no files are copied or deleted.
@@ -27,16 +40,16 @@ preserved, source files are kept, and the Compare results refresh afterwards.
 Unselected files are not synced. As with Sync, a changed same-path destination
 file is overwritten if it appeared after Compare.
 
-## Upload
+## Download
 
 The top-left **Select Folder** chooses an upload source for the current session
-only; this folder is not persisted. **Upload** copies its files, including
+only; this folder is not persisted. **Download** copies its files, including
 subfolders, into Bank-A using their relative paths. Existing same-path files
 are skipped, never overwritten. No files are uploaded to Bank-B, and no files
 are deleted. The selected source path is displayed beneath the upload controls.
 There is no bottom status bar; errors and warnings are shown in dialogs.
 
-If no upload folder is selected, **Upload** on macOS opens the system
+If no upload folder is selected, **Download** on macOS opens the system
 **Image Capture** app and Bank-A in Finder instead. Connect/select your device,
 choose **Import To > Other...**, and select Bank-A before importing photos.
 The tool displays these instructions but does not automatically set the import

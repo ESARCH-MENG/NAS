@@ -3,15 +3,29 @@ import subprocess
 import json
 import plistlib
 import sys
+import threading
+import time
 import tkinter as tk
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 from PIL import Image
 
-from nas_tool import NasTool, ToggleSwitch, compare_directories, delete_selected_files, sync_a_to_b, upload_to_bank_a, open_image_capture
+from nas_tool import (
+    NasTool,
+    EmergencyStopButton,
+    HELP_TEXT,
+    OperationCancelled,
+    ToggleSwitch,
+    compare_directories,
+    delete_selected_files,
+    open_image_capture,
+    stop_image_capture,
+    sync_a_to_b,
+    upload_to_bank_a,
+)
 from nas_tool import (
     AGENT_LABEL,
     Settings,
@@ -22,6 +36,16 @@ from nas_tool import (
     scheduled_sync,
     sync_lock,
 )
+
+
+def wait_for_task(window: tk.Misc, app: NasTool, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while app._task_thread is not None:
+        window.update()
+        if time.monotonic() >= deadline:
+            raise AssertionError("Background task did not finish.")
+        time.sleep(0.01)
+    window.update()
 
 
 class NasToolFileOperationTests(unittest.TestCase):
@@ -72,6 +96,28 @@ class NasToolFileOperationTests(unittest.TestCase):
             (self.bank_b / "subfolder" / "nested.txt").read_text(encoding="utf-8"),
             "nested",
         )
+
+    def test_cancelled_sync_preserves_existing_file_and_removes_partial_file(self) -> None:
+        source = self.bank_a / "large.bin"
+        destination = self.bank_b / "large.bin"
+        source.write_bytes(b"new" * 100_000)
+        destination.write_bytes(b"original")
+
+        def cancelled() -> bool:
+            partials = list(self.bank_b.glob(".*.nas-tool-part"))
+            return bool(partials and partials[0].stat().st_size > 0)
+
+        with patch("nas_tool.CHUNK_SIZE", 1024), self.assertRaises(
+            OperationCancelled
+        ):
+            sync_a_to_b(
+                self.bank_a,
+                self.bank_b,
+                cancelled=cancelled,
+            )
+
+        self.assertEqual(destination.read_bytes(), b"original")
+        self.assertEqual(list(self.bank_b.glob(".*.nas-tool-part")), [])
 
     def test_delete_removes_only_selected_files(self) -> None:
         (self.bank_a / "remove.txt").write_text("remove", encoding="utf-8")
@@ -156,7 +202,7 @@ class NasToolFileOperationTests(unittest.TestCase):
             ) as lock:
                 button.event_generate("<ButtonPress-1>", x=10, y=10)
                 button.event_generate("<ButtonRelease-1>", x=10, y=10)
-                window.update()
+                wait_for_task(window, app)
                 error.assert_not_called()
                 lock.assert_called_once_with(app.settings_path)
             for source, destination, bank in (
@@ -190,6 +236,7 @@ class NasToolFileOperationTests(unittest.TestCase):
                 "nas_tool.messagebox.showerror"
             ) as error:
                 app._sync_selected()
+                wait_for_task(window, app)
                 error.assert_called_once_with("Sync Selected failed", "Copy denied")
             self.assertEqual(app.results, {"A": [], "B": []})
             self.assertTrue(app.sync_selected_button._enabled)
@@ -222,6 +269,99 @@ class NasToolFileOperationTests(unittest.TestCase):
                         app.sync_selected_button.winfo_rootx(),
                         app.delete_button.winfo_rootx(),
                     )
+                    self.assertGreater(
+                        app.stop_button.winfo_rootx(),
+                        app.delete_button.winfo_rootx(),
+                    )
+        finally:
+            window.destroy()
+
+    def test_stop_button_is_bottom_right_and_idle_click_keeps_window_open(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            window.update()
+            self.assertIsInstance(app.stop_button, EmergencyStopButton)
+            self.assertEqual(
+                app.stop_button.itemcget(app.stop_button.find_all()[0], "fill"),
+                "#cc0000",
+            )
+            self.assertEqual(
+                app.stop_button.itemcget(app.stop_button.find_all()[1], "fill"),
+                "#ffffff",
+            )
+            self.assertGreater(
+                app.stop_button.winfo_rooty(),
+                app.delete_button.winfo_rooty(),
+            )
+            app.stop_button.event_generate("<ButtonPress-1>", x=10, y=10)
+            self.assertEqual(
+                app.stop_button.itemcget(app.stop_button.find_all()[0], "fill"),
+                "#990000",
+            )
+            self.assertTrue(window.winfo_exists())
+        finally:
+            window.destroy()
+
+    def test_folder_buttons_are_equal_sized_and_bottom_right_aligned(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            window.geometry("920x680")
+            window.update()
+            for bank in ("A", "B"):
+                with self.subTest(bank=bank):
+                    select_button, open_button = app.folder_buttons[bank]
+                    panel = select_button.master.master.master
+                    self.assertEqual(
+                        (select_button.winfo_width(), select_button.winfo_height()),
+                        (open_button.winfo_width(), open_button.winfo_height()),
+                    )
+                    self.assertEqual(select_button.winfo_width(), 114)
+                    self.assertEqual(select_button.winfo_rooty(), open_button.winfo_rooty())
+                    self.assertLess(select_button.winfo_rootx(), open_button.winfo_rootx())
+                    self.assertEqual(
+                        open_button.winfo_rootx() + open_button.winfo_width(),
+                        panel.winfo_rootx() + panel.winfo_width() - 12,
+                    )
+                    self.assertEqual(
+                        open_button.winfo_rooty() + open_button.winfo_height(),
+                        panel.winfo_rooty() + panel.winfo_height() - 12,
+                    )
+                    for button in (select_button, open_button):
+                        text_bounds = button.bbox(button.find_all()[-1])
+                        self.assertIsNotNone(text_bounds)
+                        assert text_bounds is not None
+                        self.assertGreaterEqual(text_bounds[0], 10)
+                        self.assertLessEqual(text_bounds[2], button.winfo_width() - 10)
+        finally:
+            window.destroy()
+
+    def test_help_menu_opens_single_english_user_guide(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            menu_name = window.cget("menu")
+            menu = window.nametowidget(menu_name)
+            self.assertEqual(menu.entrycget(1, "label"), "Help")
+
+            app._show_help()
+            window.update()
+            help_window = app._help_window
+            self.assertIsNotNone(help_window)
+            assert help_window is not None
+            guide = next(
+                child
+                for frame in help_window.winfo_children()
+                for child in frame.winfo_children()
+                if isinstance(child, tk.Text)
+            )
+            self.assertEqual(guide.get("1.0", tk.END).strip(), HELP_TEXT.strip())
+            self.assertIn("Emergency Stop", guide.get("1.0", tk.END))
+
+            app._show_help()
+            window.update()
+            self.assertIs(app._help_window, help_window)
         finally:
             window.destroy()
 
@@ -285,6 +425,58 @@ class NasToolFileOperationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             upload_to_bank_a(self.bank_a, self.bank_a)
 
+    def test_cancelled_folder_download_removes_partial_file(self) -> None:
+        source = self.base / "upload"
+        source.mkdir()
+        (source / "large.bin").write_bytes(b"download" * 100_000)
+        destination = self.bank_a / "large.bin"
+
+        def cancelled() -> bool:
+            return destination.exists() and destination.stat().st_size > 0
+
+        with patch("nas_tool.CHUNK_SIZE", 1024), self.assertRaises(
+            OperationCancelled
+        ):
+            upload_to_bank_a(
+                source,
+                self.bank_a,
+                cancelled=cancelled,
+            )
+
+        self.assertFalse(destination.exists())
+
+    def test_stop_button_cancels_sync_and_folder_download(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths = {"A": self.bank_a, "B": self.bank_b}
+            source = self.base / "upload"
+            source.mkdir()
+            app.upload_folder = source
+
+            for start, target in (
+                (app._sync, "nas_tool.sync_a_to_b"),
+                (app._upload, "nas_tool.upload_to_bank_a"),
+            ):
+                with self.subTest(target=target):
+                    started = threading.Event()
+
+                    def wait_for_stop(*_args: object, **kwargs: object) -> object:
+                        cancelled = kwargs["cancelled"]
+                        started.set()
+                        while not cancelled():
+                            time.sleep(0.005)
+                        raise OperationCancelled
+
+                    with patch(target, side_effect=wait_for_stop):
+                        start()
+                        self.assertTrue(started.wait(1))
+                        app._stop()
+                        wait_for_task(window, app)
+                    self.assertTrue(window.winfo_exists())
+        finally:
+            window.destroy()
+
     def test_upload_selection_is_not_persisted_and_upload_targets_a(self) -> None:
         source = self.base / "upload"
         source.mkdir()
@@ -299,6 +491,7 @@ class NasToolFileOperationTests(unittest.TestCase):
             self.assertEqual(app.upload_path_label.cget("text"), str(source))
             self.assertFalse(settings.exists())
             app._upload()
+            wait_for_task(window, app)
             self.assertEqual(app.upload_path_label.cget("text"), str(source))
             self.assertTrue((self.bank_a / "new.txt").exists())
             self.assertFalse((self.bank_b / "new.txt").exists())
@@ -365,6 +558,23 @@ class NasToolFileOperationTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "App unavailable"):
                 open_image_capture(self.bank_a)
 
+    def test_stop_image_capture_quits_the_macos_app(self) -> None:
+        with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as run:
+            stop_image_capture()
+        run.assert_called_once_with(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                'tell application "Image Capture" to quit',
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_upload_without_source_uses_image_capture(self) -> None:
         window = tk.Tk()
         try:
@@ -378,7 +588,34 @@ class NasToolFileOperationTests(unittest.TestCase):
                 info.assert_called_once()
                 upload.assert_not_called()
             self.assertIsNone(app.upload_folder)
+            self.assertTrue(app._image_capture_active)
             self.assertFalse(hasattr(app, "status"))
+        finally:
+            window.destroy()
+
+    def test_stop_button_ends_image_capture_without_closing_window(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths["A"] = self.bank_a
+            with patch("nas_tool.open_image_capture"), patch(
+                "nas_tool.messagebox.showinfo"
+            ):
+                app._upload()
+            app._task_thread = Mock()
+            app._task_thread.is_alive.return_value = True
+
+            def assert_cancel_was_prioritized() -> None:
+                self.assertTrue(app._cancel_event.is_set())
+
+            with patch(
+                "nas_tool.stop_image_capture",
+                side_effect=assert_cancel_was_prioritized,
+            ) as stop:
+                app._stop()
+            stop.assert_called_once_with()
+            self.assertFalse(app._image_capture_active)
+            self.assertTrue(window.winfo_exists())
         finally:
             window.destroy()
 

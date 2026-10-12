@@ -7,9 +7,12 @@ import json
 import logging
 import os
 import plistlib
+import queue
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import tkinter as tk
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -49,8 +52,69 @@ TEXT_SUFFIXES = {
     ".yml",
 }
 
+HELP_TEXT = """NAS Tool User Guide
+
+1. Bank folders
+Use SELECT FOLDER in the Bank-A and Bank-B panels to choose two separate
+folders. The selections are saved and restored the next time NAS Tool starts.
+OPEN FOLDER opens the selected folder in the operating system.
+
+2. Compare and preview
+Click COMPARE to list files that exist only in Bank-A or only in Bank-B.
+Select one or more list entries to preview the active image or text file.
+Clicking a selected entry again removes it from the selection.
+
+3. Sync
+SYNC A -> B copies new files and changed same-path files from Bank-A to Bank-B.
+It never deletes extra files from Bank-B.
+
+SYNC SELECTED copies only selected comparison results to the opposite bank.
+Bank-A selections go to Bank-B, and Bank-B selections go to Bank-A. Files from
+both lists can be selected and copied in one operation.
+
+4. Download
+Use the top SELECT FOLDER button to choose a source folder, then click DOWNLOAD.
+Its files and subfolders are copied into Bank-A. Existing same-path files are
+skipped and are not overwritten.
+
+On macOS, clicking DOWNLOAD without a source folder opens Image Capture and
+Bank-A. In Image Capture, choose Bank-A as the import destination.
+
+5. Delete
+DELETE SELECTED permanently deletes the selected comparison results from their
+current bank after confirmation. This action cannot be undone.
+
+6. Emergency Stop
+The circular red STOP button has priority over active copy operations. It stops
+SYNC, SYNC SELECTED, or a folder DOWNLOAD as soon as the current copy chunk
+finishes. An incomplete new file is removed, and an existing destination is
+not replaced until its complete new copy is ready.
+
+During a macOS Image Capture import, STOP quits Image Capture. When no supported
+operation is active, STOP does nothing and does not close NAS Tool.
+
+7. Scheduled Sync (macOS)
+Choose a time and cycle, then enable Scheduled Sync. The background task copies
+Bank-A to Bank-B at the configured calendar time. Disable the switch before
+changing the schedule, then enable it again. Both bank folders must be
+available. Scheduled Sync is not available on Windows.
+
+Errors and unavailable folders are reported in dialogs. NAS volumes must be
+mounted and accessible before comparing, copying, or scheduling a sync.
+"""
+
 
 AGENT_LABEL = "com.marvel.nas-tool.sync"
+CancelCheck = Callable[[], bool]
+
+
+class OperationCancelled(Exception):
+    pass
+
+
+def _raise_if_cancelled(cancelled: CancelCheck | None) -> None:
+    if cancelled is not None and cancelled():
+        raise OperationCancelled
 
 
 def default_settings_path() -> Path:
@@ -423,7 +487,58 @@ class RoundedButton(tk.Canvas):
             self._command()
 
 
-def _file_map(root: Path) -> dict[str, Path]:
+class EmergencyStopButton(tk.Canvas):
+    def __init__(self, master: tk.Misc, command: Callable[[], None]) -> None:
+        super().__init__(
+            master,
+            width=44,
+            height=44,
+            bg=master.cget("bg"),
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self._command = command
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", lambda _event: self._draw(False))
+        self.bind("<Enter>", lambda _event: self._draw(True))
+        self.bind("<Leave>", lambda _event: self._draw(False))
+        self._draw(False)
+
+    def _draw(self, active: bool) -> None:
+        self.delete("all")
+        fill, outline = (
+            ("#990000", "#660000")
+            if active
+            else ("#cc0000", "#8b0000")
+        )
+        self.create_oval(
+            2,
+            2,
+            42,
+            42,
+            fill=fill,
+            outline=outline,
+            width=2.5,
+        )
+        self.create_text(
+            22,
+            22,
+            text="STOP",
+            fill="#ffffff",
+            font=("Consolas", 8, "bold"),
+        )
+
+    def _on_press(self, event: tk.Event) -> str:
+        if event.widget is self:
+            self._command()
+            self._draw(True)
+        return "break"
+
+
+def _file_map(
+    root: Path, *, cancelled: CancelCheck | None = None
+) -> dict[str, Path]:
     root = root.expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"Folder does not exist or cannot be accessed: {root}")
@@ -433,6 +548,7 @@ def _file_map(root: Path) -> dict[str, Path]:
         raise error
 
     for current, directories, filenames in os.walk(root, followlinks=False, onerror=scan_failed):
+        _raise_if_cancelled(cancelled)
         current_path = Path(current)
         directories[:] = [
             name
@@ -440,6 +556,7 @@ def _file_map(root: Path) -> dict[str, Path]:
             if not (current_path / name).is_symlink()
         ]
         for filename in filenames:
+            _raise_if_cancelled(cancelled)
             path = current_path / filename
             if path.is_symlink() or not path.is_file():
                 continue
@@ -483,23 +600,62 @@ def compare_directories(root_a: Path, root_b: Path) -> tuple[list[str], list[str
     return only_a, only_b
 
 
-def _file_digest(path: Path) -> str:
+def _file_digest(path: Path, cancelled: CancelCheck | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        while chunk := source.read(CHUNK_SIZE):
+        while True:
+            _raise_if_cancelled(cancelled)
+            chunk = source.read(CHUNK_SIZE)
+            if not chunk:
+                break
             digest.update(chunk)
     return digest.hexdigest()
 
 
+def _copy_replacing(
+    source: Path, destination: Path, cancelled: CancelCheck | None
+) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".nas-tool-part",
+            delete=False,
+        ) as target:
+            temporary_path = Path(target.name)
+            with source.open("rb") as incoming:
+                while True:
+                    _raise_if_cancelled(cancelled)
+                    chunk = incoming.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    target.write(chunk)
+        _raise_if_cancelled(cancelled)
+        shutil.copystat(source, temporary_path)
+        _raise_if_cancelled(cancelled)
+        temporary_path.replace(destination)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def sync_a_to_b(
-    root_a: Path, root_b: Path, *, relative_paths: list[str] | None = None
+    root_a: Path,
+    root_b: Path,
+    *,
+    relative_paths: list[str] | None = None,
+    cancelled: CancelCheck | None = None,
 ) -> list[str]:
     """Copy all or selected files from the first root to the second, without deletions."""
     root_a, root_b = _validate_roots(root_a, root_b)
-    files_a = _file_map(root_a)
+    files_a = _file_map(root_a, cancelled=cancelled)
     if relative_paths is not None:
         selected: dict[str, Path] = {}
         for relative_path in relative_paths:
+            _raise_if_cancelled(cancelled)
             relative = Path(relative_path)
             if relative.is_absolute() or relative.drive or ".." in relative.parts:
                 raise ValueError(f"Invalid relative file path: {relative_path}")
@@ -508,13 +664,17 @@ def sync_a_to_b(
                 raise FileNotFoundError(f"Selected file does not exist: {root_a / relative}")
             selected[key] = files_a[key]
         files_a = selected
-    files_b = _file_map(root_b)
+    files_b = _file_map(root_b, cancelled=cancelled)
     copied: list[str] = []
 
     for key, source in files_a.items():
+        _raise_if_cancelled(cancelled)
         relative_path = source.relative_to(root_a)
         destination = root_b / relative_path
-        if key in files_b and _file_digest(source) == _file_digest(files_b[key]):
+        if (
+            key in files_b
+            and _file_digest(source, cancelled) == _file_digest(files_b[key], cancelled)
+        ):
             continue
 
         if destination.is_symlink() or not destination.parent.resolve().is_relative_to(root_b):
@@ -524,8 +684,9 @@ def sync_a_to_b(
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.resolve().is_relative_to(root_b):
             raise ValueError(f"Destination path is outside the destination bank: {relative_path}")
-        shutil.copy2(source, destination)
+        _copy_replacing(source, destination, cancelled)
         copied.append(relative_path.as_posix())
+    _raise_if_cancelled(cancelled)
     return copied
 
 
@@ -552,12 +713,18 @@ def delete_selected_files(root: Path, relative_paths: list[str]) -> list[str]:
     return [relative_path for relative_path, _ in targets]
 
 
-def upload_to_bank_a(source_root: Path, bank_a: Path) -> tuple[int, int]:
+def upload_to_bank_a(
+    source_root: Path,
+    bank_a: Path,
+    *,
+    cancelled: CancelCheck | None = None,
+) -> tuple[int, int]:
     source_root, bank_a = _validate_roots(source_root, bank_a)
-    sources = _file_map(source_root)
-    existing = _file_map(bank_a)
+    sources = _file_map(source_root, cancelled=cancelled)
+    existing = _file_map(bank_a, cancelled=cancelled)
     copied = skipped = 0
     for key, source in sources.items():
+        _raise_if_cancelled(cancelled)
         relative = source.relative_to(source_root)
         destination = bank_a / relative
         if key in existing:
@@ -575,12 +742,20 @@ def upload_to_bank_a(source_root: Path, bank_a: Path) -> tuple[int, int]:
             continue
         try:
             with target, source.open("rb") as incoming:
-                shutil.copyfileobj(incoming, target)
+                while True:
+                    _raise_if_cancelled(cancelled)
+                    chunk = incoming.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    target.write(chunk)
+            _raise_if_cancelled(cancelled)
             shutil.copystat(source, destination)
-        except OSError:
+            _raise_if_cancelled(cancelled)
+        except (OSError, OperationCancelled):
             destination.unlink(missing_ok=True)
             raise
         copied += 1
+    _raise_if_cancelled(cancelled)
     return copied, skipped
 
 
@@ -602,6 +777,26 @@ def open_image_capture(bank_a: Path) -> None:
                 result.stderr.strip() or result.stdout.strip()
                 or f"Unable to open Image Capture or Bank-A (exit {result.returncode})."
             )
+
+
+def stop_image_capture() -> None:
+    if sys.platform != "darwin":
+        raise ValueError("Image Capture is available on macOS only.")
+    result = subprocess.run(
+        [
+            "/usr/bin/osascript",
+            "-e",
+            'tell application "Image Capture" to quit',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise OSError(
+            result.stderr.strip() or result.stdout.strip()
+            or f"Unable to stop Image Capture (exit {result.returncode})."
+        )
 
 
 class ToggleSwitch(tk.Canvas):
@@ -668,6 +863,15 @@ class NasTool:
         self.result_headers: dict[str, tk.Label] = {}
         self.preview_texts: dict[str, tk.Text] = {}
         self.preview_image_labels: dict[str, tk.Canvas] = {}
+        self.folder_buttons: dict[str, tuple[RoundedButton, RoundedButton]] = {}
+        self._cancel_event = threading.Event()
+        self._task_results: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._task_thread: threading.Thread | None = None
+        self._task_on_success: Callable[[object], None] | None = None
+        self._task_error_title = ""
+        self._task_clear_on_error = False
+        self._image_capture_active = False
+        self._help_window: tk.Toplevel | None = None
 
         self._build_ui()
         self._restore_settings()
@@ -677,6 +881,7 @@ class NasTool:
         self.root.title("NAS Tool")
         self.root.geometry("1080x780")
         self.root.minsize(920, 680)
+        self._build_menu()
 
         shell = RoundedSurface(
             self.root,
@@ -699,7 +904,7 @@ class NasTool:
         upload = tk.Frame(header, bg=PANEL)
         upload.pack(side="left")
         RoundedButton(
-            upload, "UPLOAD", self._upload, width=125, height=30, primary=True,
+            upload, "DOWNLOAD", self._upload, width=125, height=30, primary=True,
         ).pack(side="left")
         RoundedButton(
             upload, "SELECT FOLDER", self._select_upload_folder, width=125, height=30,
@@ -748,6 +953,12 @@ class NasTool:
             width=125, height=30, orange=True,
         )
         self.delete_button.pack(side="left")
+        stop_controls = tk.Frame(content, bg=PANEL)
+        stop_controls.grid(
+            row=5, column=0, columnspan=3, sticky="e", pady=(0, 2)
+        )
+        self.stop_button = EmergencyStopButton(stop_controls, self._stop)
+        self.stop_button.pack()
 
         schedule = tk.Frame(header, bg=PANEL)
         schedule.pack(side="right")
@@ -797,6 +1008,117 @@ class NasTool:
             state="readonly", width=7, font=("Consolas", 9),
         ).pack(side="left")
 
+    def _build_menu(self) -> None:
+        menu = tk.Menu(self.root)
+        help_menu = tk.Menu(menu, tearoff=False)
+        help_menu.add_command(
+            label="User Guide",
+            command=self._show_help,
+            accelerator="F1",
+        )
+        menu.add_cascade(label="Help", menu=help_menu)
+        self.root.configure(menu=menu)
+        self.root.bind("<F1>", lambda _event: self._show_help())
+
+    def _show_help(self) -> None:
+        if self._help_window is not None and self._help_window.winfo_exists():
+            self._help_window.lift()
+            self._help_window.focus_force()
+            return
+
+        window = tk.Toplevel(self.root)
+        self._help_window = window
+        window.title("NAS Tool User Guide")
+        window.geometry("720x620")
+        window.minsize(560, 420)
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", window.destroy)
+
+        content = tk.Frame(window, bg=PANEL)
+        content.pack(fill="both", expand=True, padx=18, pady=18)
+        content.rowconfigure(0, weight=1)
+        content.columnconfigure(0, weight=1)
+        guide = tk.Text(
+            content,
+            wrap="word",
+            bg=BG,
+            fg=TEXT,
+            font=("Consolas", 10),
+            padx=14,
+            pady=14,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=SOFT_BORDER,
+        )
+        guide.grid(row=0, column=0, sticky="nsew")
+        scrollbar = tk.Scrollbar(content, orient="vertical", command=guide.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        guide.configure(yscrollcommand=scrollbar.set)
+        guide.insert("1.0", HELP_TEXT)
+        guide.configure(state="disabled")
+        ttk.Button(window, text="Close", command=window.destroy).pack(
+            pady=(0, 16)
+        )
+
+    def _start_task(
+        self,
+        worker: Callable[[CancelCheck], object],
+        on_success: Callable[[object], None],
+        *,
+        error_title: str,
+        clear_on_error: bool = False,
+    ) -> None:
+        if self._task_thread is not None and self._task_thread.is_alive():
+            return
+        self._cancel_event.clear()
+        self._task_on_success = on_success
+        self._task_error_title = error_title
+        self._task_clear_on_error = clear_on_error
+
+        def run() -> None:
+            try:
+                result = worker(self._cancel_event.is_set)
+            except OperationCancelled:
+                self._task_results.put(("cancelled", None))
+            except (OSError, ValueError) as error:
+                self._task_results.put(("error", error))
+            else:
+                self._task_results.put(("success", result))
+
+        self._task_thread = threading.Thread(target=run, daemon=True)
+        self._task_thread.start()
+        self.root.after(25, self._poll_task)
+
+    def _poll_task(self) -> None:
+        try:
+            status, payload = self._task_results.get_nowait()
+        except queue.Empty:
+            if self._task_thread is not None:
+                self.root.after(25, self._poll_task)
+            return
+
+        on_success = self._task_on_success
+        self._task_thread = None
+        self._task_on_success = None
+        if status == "success" and on_success is not None:
+            on_success(payload)
+        elif status == "error":
+            if self._task_clear_on_error:
+                self._clear_results()
+            messagebox.showerror(self._task_error_title, str(payload))
+
+    def _stop(self) -> None:
+        if self._task_thread is not None and self._task_thread.is_alive():
+            self._cancel_event.set()
+        if self._image_capture_active:
+            try:
+                stop_image_capture()
+            except (OSError, ValueError) as error:
+                messagebox.showerror("Stop Failed", str(error))
+            else:
+                self._image_capture_active = False
+
     def _select_upload_folder(self) -> None:
         chosen = filedialog.askdirectory(title="Select Upload Folder")
         if not chosen:
@@ -815,6 +1137,7 @@ class NasTool:
                 raise ValueError("Select a Bank-A folder first.")
             if self.upload_folder is None:
                 open_image_capture(bank_a)
+                self._image_capture_active = True
                 messagebox.showinfo(
                     "Import with Image Capture",
                     "Bank-A and Image Capture have been opened.\n\n"
@@ -827,15 +1150,32 @@ class NasTool:
                     "skip-existing policy does not apply here.",
                 )
                 return
-            with sync_lock(self.settings_path):
-                upload_to_bank_a(self.upload_folder, bank_a)
         except (OSError, ValueError) as error:
             self._clear_results()
-            messagebox.showerror("Upload Failed", str(error))
+            messagebox.showerror("Download Failed", str(error))
             return
-        self._clear_results()
-        if self.bank_paths["B"] is not None and self.bank_paths["B"].is_dir():
-            self._compare()
+
+        upload_folder = self.upload_folder
+        if upload_folder is None:
+            return
+
+        def download(cancelled: CancelCheck) -> object:
+            with sync_lock(self.settings_path):
+                return upload_to_bank_a(
+                    upload_folder, bank_a, cancelled=cancelled
+                )
+
+        def download_complete(_result: object) -> None:
+            self._clear_results()
+            if self.bank_paths["B"] is not None and self.bank_paths["B"].is_dir():
+                self._compare()
+
+        self._start_task(
+            download,
+            download_complete,
+            error_title="Download Failed",
+            clear_on_error=True,
+        )
 
     def _restore_settings(self) -> None:
         try:
@@ -897,6 +1237,7 @@ class NasTool:
         side.grid(row=row, column=0, sticky="nsew", padx=(0, 8), pady=7)
         side_content = side.inner
         side_content.columnconfigure(0, weight=1)
+        side_content.rowconfigure(2, weight=1)
         tk.Label(
             side_content,
             text=f"BANK-{bank}",
@@ -904,22 +1245,6 @@ class NasTool:
             fg=TEXT,
             font=("Consolas", 15, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(2, 12))
-        folder_buttons = tk.Frame(side_content, bg=PANEL)
-        folder_buttons.grid(row=1, column=0, sticky="w")
-        RoundedButton(
-            folder_buttons,
-            "SELECT FOLDER",
-            lambda: self._select_folder(bank),
-            width=90,
-            height=34,
-        ).pack(side="left")
-        RoundedButton(
-            folder_buttons,
-            "OPEN FOLDER",
-            lambda: self._open_folder(bank),
-            width=90,
-            height=34,
-        ).pack(side="left", padx=(6, 0))
         path_label = tk.Label(
             side_content,
             text="No folder selected",
@@ -930,8 +1255,27 @@ class NasTool:
             anchor="nw",
             font=("Consolas", 8),
         )
-        path_label.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        path_label.grid(row=1, column=0, sticky="new")
         self.path_labels[bank] = path_label
+        folder_buttons = tk.Frame(side_content, bg=PANEL)
+        folder_buttons.grid(row=3, column=0, sticky="se")
+        select_button = RoundedButton(
+            folder_buttons,
+            "SELECT FOLDER",
+            lambda: self._select_folder(bank),
+            width=114,
+            height=34,
+        )
+        select_button.pack(side="left")
+        open_button = RoundedButton(
+            folder_buttons,
+            "OPEN FOLDER",
+            lambda: self._open_folder(bank),
+            width=114,
+            height=34,
+        )
+        open_button.pack(side="left", padx=(2, 0))
+        self.folder_buttons[bank] = (select_button, open_button)
 
         result_frame = RoundedSurface(parent, padding=10)
         result_frame.grid(row=row, column=1, sticky="nsew", padx=5, pady=7)
@@ -1122,13 +1466,19 @@ class NasTool:
     def _sync(self) -> None:
         try:
             root_a, root_b = self._get_roots()
-            with sync_lock(self.settings_path):
-                sync_a_to_b(root_a, root_b)
         except (OSError, ValueError) as error:
             messagebox.showerror("Sync failed", str(error))
             return
 
-        self._compare()
+        def sync(cancelled: CancelCheck) -> object:
+            with sync_lock(self.settings_path):
+                return sync_a_to_b(root_a, root_b, cancelled=cancelled)
+
+        self._start_task(
+            sync,
+            lambda _result: self._compare(),
+            error_title="Sync failed",
+        )
 
     def _sync_selected(self) -> None:
         selected = {
@@ -1143,16 +1493,33 @@ class NasTool:
 
         try:
             root_a, root_b = self._get_roots()
-            with sync_lock(self.settings_path):
-                for bank, source, destination in (("A", root_a, root_b), ("B", root_b, root_a)):
-                    if selected[bank]:
-                        sync_a_to_b(source, destination, relative_paths=selected[bank])
         except (OSError, ValueError) as error:
             self._clear_results()
             messagebox.showerror("Sync Selected failed", str(error))
             return
 
-        self._compare()
+        def sync_selected(cancelled: CancelCheck) -> object:
+            with sync_lock(self.settings_path):
+                for bank, source, destination in (
+                    ("A", root_a, root_b),
+                    ("B", root_b, root_a),
+                ):
+                    _raise_if_cancelled(cancelled)
+                    if selected[bank]:
+                        sync_a_to_b(
+                            source,
+                            destination,
+                            relative_paths=selected[bank],
+                            cancelled=cancelled,
+                        )
+            return None
+
+        self._start_task(
+            sync_selected,
+            lambda _result: self._compare(),
+            error_title="Sync Selected failed",
+            clear_on_error=True,
+        )
 
     def _delete(self) -> None:
         selected: dict[str, list[str]] = {
