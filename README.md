@@ -14,6 +14,18 @@ Compare lists files found only in Bank-A or only in Bank-B. Selecting a result
 previews that file. Sync copies new or changed files from A to B; it does not
 delete extra files in B. Delete Selected permanently deletes selected results
 after confirmation.
+The bottom controls align with the three UI columns: **Sync** is centered on
+the left, **Compare** in the middle, and **Sync Selected** / **Delete Selected**
+are centered together on the right, in that order.
+Both selected-file buttons keep their normal colors at all times. Clicking
+either without a selection shows a dialog asking you to select Compare results;
+no files are copied or deleted.
+**Sync Selected**, beside **Delete Selected**, copies only the selected Compare
+results to the opposite bank: A selections go to B, and B selections go to A.
+Selections in both banks can be synced together. Relative subfolder paths are
+preserved, source files are kept, and the Compare results refresh afterwards.
+Unselected files are not synced. As with Sync, a changed same-path destination
+file is overwritten if it appeared after Compare.
 
 ## Upload
 
@@ -90,19 +102,6 @@ fitting approach. It uses macOS `iconutil` when available, otherwise Pillow's
 ICNS encoder. Use this ICNS as the icon when building the macOS app bundle.
 The current source is low-resolution; a 1024px original will produce sharper
 large icons.
-
-## Build macOS DMG
-
-On macOS, install the project dependencies and run:
-
-```sh
-python3 -m pip install -r requirements.txt
-python3 packaging/create_dmg.py
-```
-
-The script builds `NAS Tool.app` and creates `~/Desktop/NAS-Tool.dmg`. If
-PyInstaller is not installed, it installs it into a temporary build environment.
-Use `--force` to replace an existing DMG.
 
 ## Tests
 
