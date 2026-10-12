@@ -490,10 +490,23 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sync_a_to_b(root_a: Path, root_b: Path) -> list[str]:
-    """Copy new or changed files from A to B without deleting files in B."""
+def sync_a_to_b(
+    root_a: Path, root_b: Path, *, relative_paths: list[str] | None = None
+) -> list[str]:
+    """Copy all or selected files from the first root to the second, without deletions."""
     root_a, root_b = _validate_roots(root_a, root_b)
     files_a = _file_map(root_a)
+    if relative_paths is not None:
+        selected: dict[str, Path] = {}
+        for relative_path in relative_paths:
+            relative = Path(relative_path)
+            if relative.is_absolute() or relative.drive or ".." in relative.parts:
+                raise ValueError(f"Invalid relative file path: {relative_path}")
+            key = _path_key(relative.as_posix())
+            if key not in files_a:
+                raise FileNotFoundError(f"Selected file does not exist: {root_a / relative}")
+            selected[key] = files_a[key]
+        files_a = selected
     files_b = _file_map(root_b)
     copied: list[str] = []
 
@@ -505,9 +518,11 @@ def sync_a_to_b(root_a: Path, root_b: Path) -> list[str]:
 
         if destination.is_symlink() or not destination.parent.resolve().is_relative_to(root_b):
             raise ValueError(f"Unsafe destination path: {relative_path}")
+        if relative_paths is not None and destination.is_dir():
+            raise ValueError(f"A folder already occupies the sync destination: {relative_path}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.resolve().is_relative_to(root_b):
-            raise ValueError(f"Destination path is outside Bank-B: {relative_path}")
+            raise ValueError(f"Destination path is outside the destination bank: {relative_path}")
         shutil.copy2(source, destination)
         copied.append(relative_path.as_posix())
     return copied
@@ -705,34 +720,33 @@ class NasTool:
         self._build_bank_row(content, "A", 2)
         self._build_bank_row(content, "B", 3)
 
-        controls = tk.Frame(content, bg=PANEL)
-        controls.grid(row=4, column=0, columnspan=3, sticky="ew",
-                      padx=42, pady=(16, 12))
-        for column in range(3):
-            controls.columnconfigure(column, weight=1)
-
-        buttons = (
-            RoundedButton(
-                controls, "SYNC  A → B", self._sync,
-                width=125, height=30, primary=True,
-            ),
-            RoundedButton(
-                controls, "COMPARE", self._compare,
-                width=125, height=30, blue=True,
-            ),
-            RoundedButton(
-                controls,
-                "DELETE SELECTED",
-                self._delete,
-                width=125,
-                height=30,
-                orange=True,
-            ),
+        control_groups: list[tk.Frame] = []
+        for column, padding in enumerate(((0, 8), (5, 5), (5, 0))):
+            controls = tk.Frame(content, bg=PANEL)
+            controls.grid(
+                row=4, column=column, sticky="ew", padx=padding, pady=(16, 12)
+            )
+            group = tk.Frame(controls, bg=PANEL)
+            group.pack(anchor="center")
+            control_groups.append(group)
+        RoundedButton(
+            control_groups[0], "SYNC  A → B", self._sync,
+            width=125, height=30, primary=True,
+        ).pack()
+        RoundedButton(
+            control_groups[1], "COMPARE", self._compare,
+            width=125, height=30, blue=True,
+        ).pack()
+        self.sync_selected_button = RoundedButton(
+            control_groups[2], "SYNC SELECTED", self._sync_selected,
+            width=125, height=30, primary=True,
         )
-        for column, button in enumerate(buttons):
-            button.grid(row=0, column=column, padx=10)
-        self.delete_button = buttons[2]
-        self.delete_button.configure(state="disabled")
+        self.sync_selected_button.pack(side="left", padx=(0, 6))
+        self.delete_button = RoundedButton(
+            control_groups[2], "DELETE SELECTED", self._delete,
+            width=125, height=30, orange=True,
+        )
+        self.delete_button.pack(side="left")
 
         schedule = tk.Frame(header, bg=PANEL)
         schedule.pack(side="right")
@@ -1072,7 +1086,6 @@ class NasTool:
             for path in paths:
                 listing.insert(tk.END, path)
             self._clear_preview(bank)
-        self.delete_button.configure(state="normal" if only_a or only_b else "disabled")
 
     def _sync(self) -> None:
         try:
@@ -1081,6 +1094,30 @@ class NasTool:
                 sync_a_to_b(root_a, root_b)
         except (OSError, ValueError) as error:
             messagebox.showerror("Sync failed", str(error))
+            return
+
+        self._compare()
+
+    def _sync_selected(self) -> None:
+        selected = {
+            bank: [self.results[bank][index] for index in self.result_lists[bank].curselection()]
+            for bank in ("A", "B")
+        }
+        if not any(selected.values()):
+            messagebox.showinfo(
+                "Sync Selected", "Select one or more files from the comparison results."
+            )
+            return
+
+        try:
+            root_a, root_b = self._get_roots()
+            with sync_lock(self.settings_path):
+                for bank, source, destination in (("A", root_a, root_b), ("B", root_b, root_a)):
+                    if selected[bank]:
+                        sync_a_to_b(source, destination, relative_paths=selected[bank])
+        except (OSError, ValueError) as error:
+            self._clear_results()
+            messagebox.showerror("Sync Selected failed", str(error))
             return
 
         self._compare()
@@ -1220,7 +1257,6 @@ class NasTool:
             self.result_headers[bank].configure(text=f"ONLY IN BANK-{bank}  ·  0")
             self.result_lists[bank].delete(0, tk.END)
             self._clear_preview(bank)
-        self.delete_button.configure(state="disabled")
 
 
 def main() -> None:

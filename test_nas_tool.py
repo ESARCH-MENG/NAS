@@ -83,6 +83,182 @@ class NasToolFileOperationTests(unittest.TestCase):
         self.assertFalse((self.bank_a / "remove.txt").exists())
         self.assertTrue((self.bank_a / "keep.txt").exists())
 
+    def test_selected_sync_copies_only_selected_files_in_either_direction(self) -> None:
+        for source, destination in ((self.bank_a, self.bank_b), (self.bank_b, self.bank_a)):
+            with self.subTest(source=source):
+                name = source.name + ".txt"
+                nested = source / "nested" / name
+                nested.parent.mkdir(exist_ok=True)
+                nested.write_text("selected", encoding="utf-8")
+                unselected = source / ("unselected-" + name)
+                unselected.write_text("keep", encoding="utf-8")
+                copied = sync_a_to_b(
+                    source, destination, relative_paths=[f"nested/{name}"]
+                )
+                self.assertEqual(copied, [f"nested/{name}"])
+                self.assertEqual(
+                    (destination / "nested" / name).read_text(encoding="utf-8"), "selected"
+                )
+                self.assertTrue(nested.exists())
+                self.assertFalse((destination / unselected.name).exists())
+
+    def test_selected_sync_validates_selections_before_copying(self) -> None:
+        (self.bank_a / "selected.txt").write_text("selected", encoding="utf-8")
+        for invalid in ("missing.txt", "../outside.txt", str(self.base / "outside.txt")):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises((ValueError, FileNotFoundError)):
+                    sync_a_to_b(
+                        self.bank_a, self.bank_b, relative_paths=["selected.txt", invalid]
+                    )
+                self.assertFalse((self.bank_b / "selected.txt").exists())
+        self.assertEqual(sync_a_to_b(self.bank_a, self.bank_b, relative_paths=[]), [])
+        self.assertFalse((self.bank_b / "selected.txt").exists())
+
+    def test_selected_sync_updates_changed_file_and_rejects_directory_destination(self) -> None:
+        (self.bank_a / "selected.txt").write_text("new", encoding="utf-8")
+        (self.bank_b / "selected.txt").write_text("old", encoding="utf-8")
+        self.assertEqual(
+            sync_a_to_b(self.bank_a, self.bank_b, relative_paths=["selected.txt"]),
+            ["selected.txt"],
+        )
+        self.assertEqual((self.bank_b / "selected.txt").read_text(encoding="utf-8"), "new")
+        self.assertEqual(
+            sync_a_to_b(self.bank_a, self.bank_b, relative_paths=["selected.txt"]), []
+        )
+        (self.bank_a / "blocked.txt").write_text("blocked", encoding="utf-8")
+        (self.bank_b / "blocked.txt").mkdir()
+        with self.assertRaises(ValueError):
+            sync_a_to_b(self.bank_a, self.bank_b, relative_paths=["blocked.txt"])
+        self.assertFalse((self.bank_b / "blocked.txt" / "blocked.txt").exists())
+
+    def test_sync_selected_button_syncs_both_banks_and_refreshes_results(self) -> None:
+        for bank in (self.bank_a, self.bank_b):
+            (bank / f"{bank.name}-selected.txt").write_text("selected", encoding="utf-8")
+            (bank / f"{bank.name}-unselected.txt").write_text("unselected", encoding="utf-8")
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths = {"A": self.bank_a, "B": self.bank_b}
+            self.assertTrue(app.sync_selected_button._enabled)
+            app._compare()
+            window.update()
+            self.assertTrue(app.sync_selected_button._enabled)
+            self.assertIs(app.sync_selected_button.master, app.delete_button.master)
+            self.assertLess(
+                app.sync_selected_button.winfo_rootx(), app.delete_button.winfo_rootx()
+            )
+            for bank, source in (("A", self.bank_a), ("B", self.bank_b)):
+                index = app.results[bank].index(f"{source.name}-selected.txt")
+                app.result_lists[bank].selection_set(index)
+            button = app.sync_selected_button
+            with patch("nas_tool.messagebox.showerror") as error, patch(
+                "nas_tool.sync_lock", return_value=nullcontext()
+            ) as lock:
+                button.event_generate("<ButtonPress-1>", x=10, y=10)
+                button.event_generate("<ButtonRelease-1>", x=10, y=10)
+                window.update()
+                error.assert_not_called()
+                lock.assert_called_once_with(app.settings_path)
+            for source, destination, bank in (
+                (self.bank_a, self.bank_b, "A"), (self.bank_b, self.bank_a, "B")
+            ):
+                self.assertTrue((source / f"{source.name}-selected.txt").exists())
+                self.assertTrue((destination / f"{source.name}-selected.txt").exists())
+                self.assertFalse((destination / f"{source.name}-unselected.txt").exists())
+                self.assertEqual(app.results[bank], [f"{source.name}-unselected.txt"])
+                self.assertEqual(app.result_lists[bank].curselection(), ())
+            app._clear_results()
+            self.assertTrue(app.sync_selected_button._enabled)
+        finally:
+            window.destroy()
+
+    def test_sync_selected_reports_empty_selection_and_copy_errors(self) -> None:
+        (self.bank_a / "selected.txt").write_text("selected", encoding="utf-8")
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths = {"A": self.bank_a, "B": self.bank_b}
+            app._compare()
+            with patch("nas_tool.messagebox.showinfo") as info, patch(
+                "nas_tool.sync_a_to_b"
+            ) as sync:
+                app._sync_selected()
+                info.assert_called_once()
+                sync.assert_not_called()
+            app.result_lists["A"].selection_set(0)
+            with patch("nas_tool.sync_a_to_b", side_effect=OSError("Copy denied")), patch(
+                "nas_tool.messagebox.showerror"
+            ) as error:
+                app._sync_selected()
+                error.assert_called_once_with("Sync Selected failed", "Copy denied")
+            self.assertEqual(app.results, {"A": [], "B": []})
+            self.assertTrue(app.sync_selected_button._enabled)
+            self.assertFalse((self.bank_b / "selected.txt").exists())
+        finally:
+            window.destroy()
+
+    def test_bottom_controls_are_centered_under_each_column(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            content = app.sync_selected_button.master.master.master
+            for width in (920, 1080, 1400):
+                with self.subTest(width=width):
+                    window.geometry(f"{width}x780")
+                    window.update()
+                    for column in range(3):
+                        panel = content.grid_slaves(row=2, column=column)[0]
+                        controls = content.grid_slaves(row=4, column=column)[0]
+                        group = controls.winfo_children()[0]
+                        panel_center = panel.winfo_rootx() + panel.winfo_width() / 2
+                        group_center = group.winfo_rootx() + group.winfo_width() / 2
+                        self.assertAlmostEqual(group_center, panel_center, delta=1)
+                        self.assertGreaterEqual(group.winfo_rootx(), panel.winfo_rootx())
+                        self.assertLessEqual(
+                            group.winfo_rootx() + group.winfo_width(),
+                            panel.winfo_rootx() + panel.winfo_width(),
+                        )
+                    self.assertLess(
+                        app.sync_selected_button.winfo_rootx(),
+                        app.delete_button.winfo_rootx(),
+                    )
+        finally:
+            window.destroy()
+
+    def test_selected_buttons_keep_colors_and_prompt_when_nothing_is_selected(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths = {"A": self.bank_a, "B": self.bank_b}
+            for phase in ("startup", "empty_compare", "cleared"):
+                with self.subTest(phase=phase):
+                    if phase == "empty_compare":
+                        app._compare()
+                    elif phase == "cleared":
+                        app._clear_results()
+                    window.update()
+                    for button, title, color in (
+                        (app.sync_selected_button, "Sync Selected", "#16303b"),
+                        (app.delete_button, "Delete Selected", "#c47f2c"),
+                    ):
+                        self.assertTrue(button._enabled)
+                        button._hovered = False
+                        button._draw(button.winfo_width(), button.winfo_height())
+                        self.assertEqual(button.itemcget(button.find_all()[0], "fill"), color)
+                        with patch("nas_tool.messagebox.showinfo") as info, patch(
+                            "nas_tool.sync_a_to_b"
+                        ) as sync, patch("nas_tool.delete_selected_files") as delete:
+                            button.event_generate("<ButtonPress-1>", x=10, y=10)
+                            button.event_generate("<ButtonRelease-1>", x=10, y=10)
+                            window.update()
+                            info.assert_called_once_with(
+                                title, "Select one or more files from the comparison results."
+                            )
+                            sync.assert_not_called()
+                            delete.assert_not_called()
+        finally:
+            window.destroy()
+
     def test_delete_validates_all_selections_before_removing_any(self) -> None:
         (self.bank_a / "keep.txt").write_text("keep", encoding="utf-8")
 
@@ -379,7 +555,7 @@ class SettingsTests(unittest.TestCase):
                 app._select_folder("B")
             self.assertEqual(load_settings(self.path).bank_a, str(self.a.resolve()))
             restored = NasTool(tk.Toplevel(window), self.path)
-            self.assertEqual(restored.bank_paths, {"A": self.a.resolve(), "B": self.b.resolve()})
+            self.assertEqual(restored.bank_paths, {"A": self.a, "B": self.b})
         finally:
             window.destroy()
 
