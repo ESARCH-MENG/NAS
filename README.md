@@ -54,6 +54,15 @@ If no upload folder is selected, **Download** on macOS opens the system
 UI automation. Connect and select your device first. Grant **Accessibility**
 access to NAS Tool (or its Python/terminal host) in **System Settings > Privacy &
 Security**, and allow **Automation** access to System Events when prompted.
+Use **Privacy & Security > Accessibility** (Chinese: **隐私与安全性 > 辅助功能**),
+not the separate top-level Accessibility settings page. NAS Tool opens the
+privacy permission list when this permission is missing. Enable the launching
+application: **NAS Tool** for an app bundle, **Terminal/iTerm** for a terminal
+launch, or **Visual Studio Code** for a VS Code launch; follow the host name in
+the macOS permission prompt if it names a different application. If it is not
+listed, use **+** to add that application, unlock settings if necessary, and
+enable its switch. Quit and reopen the launching application and NAS Tool
+before retrying. Automation prompts may name both System Events and Image Capture.
 Missing permissions, an unselected device, or an unconfirmed destination are
 reported as errors, not as a successful setup. Select your device and click
 **Download** in NAS Tool again after resolving the error. The destination is

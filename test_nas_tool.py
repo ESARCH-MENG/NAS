@@ -22,6 +22,7 @@ from nas_tool import (
     compare_directories,
     delete_selected_files,
     open_image_capture,
+    open_accessibility_settings,
     stop_image_capture,
     sync_a_to_b,
     upload_to_bank_a,
@@ -673,24 +674,63 @@ class NasToolFileOperationTests(unittest.TestCase):
             ), patch("nas_tool.messagebox.showinfo") as info, patch(
                 "nas_tool.messagebox.showerror"
             ) as error, patch(
-                "nas_tool.subprocess.run"
-            ) as launch_settings:
+                "nas_tool.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as launch_settings, patch("nas_tool.sys.platform", "darwin"):
                 app._upload()
                 wait_for_task(window, app)
             info.assert_not_called()
-            error.assert_called_once_with(
-                "Download Failed",
+            error.assert_called_once()
+            self.assertEqual(error.call_args.args[0], "Download Failed")
+            self.assertIn(
                 "287:381: execution error: Allow NAS Tool (or its Python host) "
                 "in System Settings > Privacy & Security > Accessibility. (-2700)",
+                error.call_args.args[1],
             )
+            self.assertIn("click +", error.call_args.args[1])
+            self.assertIn("Terminal/iTerm", error.call_args.args[1])
             launch_settings.assert_called_once_with(
                 [
                     "/usr/bin/open",
-                    "x-apple.systempreferences:com.apple.Accessibility-Settings.extension",
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
                 ],
+                capture_output=True,
+                text=True,
                 check=False,
                 timeout=10,
             )
+            self.assertFalse(app._image_capture_active)
+        finally:
+            window.destroy()
+
+    def test_accessibility_settings_reports_launch_errors(self) -> None:
+        for failure in (
+            subprocess.CompletedProcess([], 1, "", "Settings unavailable"),
+            subprocess.TimeoutExpired("open", 10),
+            OSError("Cannot launch open"),
+        ):
+            with self.subTest(failure=failure), patch(
+                "nas_tool.sys.platform", "darwin"
+            ), patch("nas_tool.subprocess.run", side_effect=[failure]):
+                with self.assertRaises(OSError):
+                    open_accessibility_settings()
+
+    def test_image_capture_permission_error_preserved_when_settings_fail(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths["A"] = self.bank_a
+            with patch(
+                "nas_tool.open_image_capture",
+                side_effect=OSError("Allow NAS Tool (or its Python host)"),
+            ), patch(
+                "nas_tool.open_accessibility_settings",
+                side_effect=OSError("Settings unavailable"),
+            ), patch("nas_tool.messagebox.showerror") as error:
+                app._upload()
+                wait_for_task(window, app)
+            self.assertIn("Allow NAS Tool (or its Python host)", error.call_args.args[1])
+            self.assertIn("Settings unavailable", error.call_args.args[1])
             self.assertFalse(app._image_capture_active)
         finally:
             window.destroy()

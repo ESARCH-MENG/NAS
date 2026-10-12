@@ -905,18 +905,25 @@ def stop_image_capture() -> None:
 
 def open_accessibility_settings() -> None:
     if sys.platform != "darwin":
-        return
+        raise ValueError("Accessibility settings are available on macOS only.")
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "/usr/bin/open",
-                "x-apple.systempreferences:com.apple.Accessibility-Settings.extension",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
             ],
+            capture_output=True,
+            text=True,
             check=False,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    except subprocess.TimeoutExpired as error:
+        raise OSError("Timed out opening macOS Accessibility privacy settings.") from error
+    if result.returncode:
+        raise OSError(
+            result.stderr.strip() or result.stdout.strip()
+            or "Unable to open macOS Accessibility privacy settings."
+        )
 
 
 class ToggleSwitch(tk.Canvas):
@@ -1226,9 +1233,26 @@ class NasTool:
         elif status == "error":
             if self._task_clear_on_error:
                 self._clear_results()
-            messagebox.showerror(self._task_error_title, str(payload))
-            if "Allow NAS Tool (or its Python host)" in str(payload):
-                open_accessibility_settings()
+            error_message = str(payload)
+            if "Allow NAS Tool (or its Python host)" in error_message:
+                error_message += (
+                    "\n\nOpen System Settings > Privacy & Security > Accessibility "
+                    "(the privacy permission list, not the main Accessibility page).\n"
+                    "Enable the app that launches NAS Tool: NAS Tool for an app "
+                    "bundle, Terminal/iTerm for a terminal launch, or Visual Studio "
+                    "Code for a VS Code launch. Use the app named by macOS if "
+                    "it identifies a different host.\n"
+                    "If the app is absent, click + and add that application. "
+                    "Unlock the settings if required, then quit and reopen the "
+                    "launching app and NAS Tool. Click Download again.\n"
+                    "Allow Automation access to System Events and Image Capture "
+                    "if macOS prompts for it."
+                )
+                try:
+                    open_accessibility_settings()
+                except (OSError, ValueError) as error:
+                    error_message += f"\n\nCould not open settings automatically: {error}"
+            messagebox.showerror(self._task_error_title, error_message)
 
     def _stop(self) -> None:
         if self._task_thread is not None and self._task_thread.is_alive():
