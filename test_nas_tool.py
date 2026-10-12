@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 from PIL import Image
+from packaging.create_dmg import _set_app_version, _sign_app
 
 from nas_tool import (
     NasTool,
@@ -24,6 +25,7 @@ from nas_tool import (
     open_image_capture,
     open_accessibility_settings,
     open_automation_settings,
+    request_system_events_automation,
     stop_image_capture,
     sync_a_to_b,
     upload_to_bank_a,
@@ -540,10 +542,13 @@ class NasToolFileOperationTests(unittest.TestCase):
 
     def test_image_capture_sets_bank_a_as_import_destination(self) -> None:
         with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.request_system_events_automation"
+        ) as request_access, patch(
             "nas_tool.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, "", ""),
         ) as run:
             open_image_capture(self.bank_a)
+            request_access.assert_called_once_with()
             run.assert_called_once()
             automation = run.call_args
             self.assertEqual(automation.args[0][:2], ["/usr/bin/osascript", "-e"])
@@ -559,6 +564,8 @@ class NasToolFileOperationTests(unittest.TestCase):
             subprocess.TimeoutExpired("osascript", 45),
         ):
             with self.subTest(failure=failure), patch("nas_tool.sys.platform", "darwin"), patch(
+                "nas_tool.request_system_events_automation"
+            ), patch(
                 "nas_tool.subprocess.run",
                 side_effect=[failure],
             ):
@@ -569,6 +576,8 @@ class NasToolFileOperationTests(unittest.TestCase):
         bank = self.base / "photos 'quoted'"
         bank.mkdir()
         with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.request_system_events_automation"
+        ), patch(
             "nas_tool.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, "", ""),
         ) as run:
@@ -578,6 +587,8 @@ class NasToolFileOperationTests(unittest.TestCase):
 
     def test_image_capture_rejects_missing_folder_and_reports_launch_errors(self) -> None:
         with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.request_system_events_automation"
+        ), patch(
             "nas_tool.subprocess.run",
             return_value=subprocess.CompletedProcess([], 1, "", "App unavailable"),
         ) as run:
@@ -595,6 +606,41 @@ class NasToolFileOperationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "macOS only"):
                 open_image_capture(self.bank_a)
         run.assert_not_called()
+
+    def test_system_events_permission_requests_consent_from_app_process(self) -> None:
+        apple_events = Mock()
+        apple_events.AECreateDesc.return_value = 0
+        apple_events.AEDeterminePermissionToAutomateTarget.side_effect = [-1744, 0]
+        with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ), patch("nas_tool.ctypes.CDLL", return_value=apple_events):
+            request_system_events_automation()
+        permission_calls = apple_events.AEDeterminePermissionToAutomateTarget.call_args_list
+        self.assertEqual(len(permission_calls), 2)
+        self.assertFalse(permission_calls[0].args[-1])
+        self.assertTrue(permission_calls[1].args[-1])
+        apple_events.AEDisposeDesc.assert_called_once()
+
+    def test_system_events_permission_reports_previously_denied_access(self) -> None:
+        apple_events = Mock()
+        apple_events.AECreateDesc.return_value = 0
+        apple_events.AEDeterminePermissionToAutomateTarget.return_value = -1743
+        with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ), patch("nas_tool.ctypes.CDLL", return_value=apple_events):
+            with self.assertRaisesRegex(OSError, "-1743"):
+                request_system_events_automation()
+        apple_events.AEDisposeDesc.assert_called_once()
+
+    def test_system_events_launch_timeout_is_reported_as_an_os_error(self) -> None:
+        with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("open", 10),
+        ):
+            with self.assertRaisesRegex(OSError, "Timed out starting System Events"):
+                request_system_events_automation()
 
     def test_stop_image_capture_quits_the_macos_app(self) -> None:
         with patch("nas_tool.sys.platform", "darwin"), patch(
@@ -848,6 +894,49 @@ class NasToolFileOperationTests(unittest.TestCase):
             self.assertEqual(app.preview_texts["A"].get("1.0", tk.END).strip(), "")
         finally:
             window.destroy()
+
+
+class PackagingTests(unittest.TestCase):
+    def test_app_metadata_declares_automation_and_preserves_binary_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "NAS Tool.app"
+            contents = app / "Contents"
+            contents.mkdir(parents=True)
+            info_plist = contents / "Info.plist"
+            info_plist.write_bytes(
+                plistlib.dumps(
+                    {"CFBundleIdentifier": "com.marvel.nas-tool"},
+                    fmt=plistlib.FMT_BINARY,
+                )
+            )
+
+            _set_app_version(app, "2.3.4")
+
+            metadata = plistlib.loads(info_plist.read_bytes())
+            self.assertTrue(info_plist.read_bytes().startswith(b"bplist00"))
+            self.assertEqual(metadata["CFBundleVersion"], "2.3.4")
+            self.assertIn("control System Events", metadata["NSAppleEventsUsageDescription"])
+
+    def test_app_is_signed_and_verified_after_metadata_changes(self) -> None:
+        app = Path("/tmp/NAS Tool.app")
+        with patch("packaging.create_dmg.shutil.which", return_value="/usr/bin/codesign"), patch(
+            "packaging.create_dmg.subprocess.run"
+        ) as run:
+            _sign_app(app)
+
+        self.assertEqual(
+            run.call_args_list,
+            [
+                call(
+                    ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(app)],
+                    check=True,
+                ),
+                call(
+                    ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)],
+                    check=True,
+                ),
+            ],
+        )
 
 
 class SettingsTests(unittest.TestCase):

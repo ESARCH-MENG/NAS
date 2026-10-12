@@ -73,12 +73,26 @@ def _set_app_version(app: Path, version: str) -> None:
     metadata["CFBundleShortVersionString"] = version
     metadata["CFBundleVersion"] = version
     metadata["NSAppleEventsUsageDescription"] = (
-        "NAS Tool uses Apple Events to configure Image Capture's import destination."
+        "NAS Tool requests permission to control System Events and configure Image Capture's import destination."
     )
     plist_format = (
         plistlib.FMT_BINARY if contents.startswith(b"bplist00") else plistlib.FMT_XML
     )
     info_plist.write_bytes(plistlib.dumps(metadata, fmt=plist_format))
+
+
+def _sign_app(app: Path) -> None:
+    codesign = shutil.which("codesign")
+    if codesign is None:
+        raise RuntimeError("The macOS codesign command is required to sign the app bundle.")
+    subprocess.run(
+        [codesign, "--force", "--deep", "--sign", "-", str(app)],
+        check=True,
+    )
+    subprocess.run(
+        [codesign, "--verify", "--deep", "--strict", str(app)],
+        check=True,
+    )
 
 
 def _versioned_output_path(output: Path, version: str) -> Path:
@@ -148,6 +162,7 @@ def build_dmg(output: Path, replace_existing: bool = False) -> None:
             if not app.is_dir():
                 raise RuntimeError(f"PyInstaller did not create the app bundle: {app}")
             _set_app_version(app, app_version)
+            _sign_app(app)
 
             staging = build_root / "staging"
             staging.mkdir()

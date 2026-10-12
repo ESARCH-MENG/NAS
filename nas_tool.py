@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import argparse
 import json
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -872,12 +874,101 @@ end run
 """
 
 
+def request_system_events_automation() -> None:
+    if sys.platform != "darwin":
+        raise ValueError("System Events automation is available on macOS only.")
+
+    try:
+        launch = subprocess.run(
+            ["/usr/bin/open", "-a", "System Events"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OSError("Timed out starting System Events.") from error
+    if launch.returncode:
+        raise OSError(
+            launch.stderr.strip() or launch.stdout.strip()
+            or "Unable to start System Events."
+        )
+
+    class AppleEventDescriptor(ctypes.Structure):
+        _fields_ = [("descriptor_type", ctypes.c_uint32), ("data_handle", ctypes.c_void_p)]
+
+    try:
+        apple_events = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/AE.framework/AE"
+        )
+    except OSError as error:
+        raise OSError(f"Unable to load the macOS Apple Events framework: {error}") from error
+
+    create_descriptor = apple_events.AECreateDesc
+    create_descriptor.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_long,
+        ctypes.POINTER(AppleEventDescriptor),
+    ]
+    create_descriptor.restype = ctypes.c_int16
+    determine_permission = apple_events.AEDeterminePermissionToAutomateTarget
+    determine_permission.argtypes = [
+        ctypes.POINTER(AppleEventDescriptor),
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint8,
+    ]
+    determine_permission.restype = ctypes.c_int32
+    dispose_descriptor = apple_events.AEDisposeDesc
+    dispose_descriptor.argtypes = [ctypes.POINTER(AppleEventDescriptor)]
+    dispose_descriptor.restype = ctypes.c_int16
+
+    system_events_bundle = b"com.apple.systemevents"
+    target = AppleEventDescriptor()
+    result = create_descriptor(
+        int.from_bytes(b"bund", "big"),
+        system_events_bundle,
+        len(system_events_bundle),
+        ctypes.byref(target),
+    )
+    if result:
+        raise OSError(f"Unable to identify System Events for automation (error {result}).")
+
+    wildcard = int.from_bytes(b"****", "big")
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            status = determine_permission(
+                ctypes.byref(target), wildcard, wildcard, False
+            )
+            if status != -600:
+                break
+            if time.monotonic() >= deadline:
+                raise OSError("System Events did not start in time to request automation access.")
+            time.sleep(0.1)
+        if status == -1744:
+            status = determine_permission(
+                ctypes.byref(target), wildcard, wildcard, True
+            )
+        if status == -1743:
+            raise OSError(
+                "Not authorized to send Apple events to System Events. (-1743). "
+                "Enable NAS Tool in System Settings > Privacy & Security > Automation."
+            )
+        if status:
+            raise OSError(f"Unable to request System Events automation access (error {status}).")
+    finally:
+        dispose_descriptor(ctypes.byref(target))
+
+
 def open_image_capture(bank_a: Path) -> None:
     if sys.platform != "darwin":
         raise ValueError("Image Capture import is available on macOS only.")
     bank_a = bank_a.expanduser().resolve()
     if not bank_a.is_dir():
         raise ValueError(f"Bank-A folder does not exist or cannot be accessed: {bank_a}")
+    request_system_events_automation()
     try:
         result = subprocess.run(
             ["/usr/bin/osascript", "-e", IMAGE_CAPTURE_DESTINATION_SCRIPT, str(bank_a)],

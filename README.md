@@ -63,12 +63,13 @@ the macOS permission prompt if it names a different application. If it is not
 listed, use **+** to add that application, unlock settings if necessary, and
 enable its switch. Quit and reopen the launching application and NAS Tool
 before retrying. Automation prompts may name both System Events and Image Capture.
-If macOS reports **Not authorized to send Apple events to System Events (-1743)**,
-NAS Tool opens **System Settings > Privacy & Security > Automation**; enable
-NAS Tool for **System Events**. macOS has no Add button on this page; apps
-appear after they request access. NAS Tool requests access when you click
-**Download**; launch the newly built app and allow the macOS prompt. This
-permission is separate from Accessibility.
+Clicking **Download** makes NAS Tool itself request **Automation** access to
+System Events; approve the macOS prompt so NAS Tool is registered in the
+Automation list. If access was previously denied, NAS Tool opens
+**System Settings > Privacy & Security > Automation** when reporting the
+denial. Enable NAS Tool for **System Events** if it is listed. macOS does not
+provide a manual Add button on this page. This permission is separate from
+Accessibility.
 Missing permissions, an unselected device, or an unconfirmed destination are
 reported as errors, not as a successful setup. Select your device and click
 **Download** in NAS Tool again after resolving the error. The destination is
@@ -136,6 +137,13 @@ fitting approach. It uses macOS `iconutil` when available, otherwise Pillow's
 ICNS encoder. Use this ICNS as the icon when building the macOS app bundle.
 The current source is low-resolution; a 1024px original will produce sharper
 large icons.
+
+## Build macOS DMG
+
+Run `python3 packaging/create_dmg.py` on macOS to build a fresh app from the
+current `nas_tool.py` and package it. The build applies the final bundle metadata
+and re-signs/verifies the `.app` afterward; distribute the newly created DMG
+when application code or macOS privacy metadata changes.
 
 ## Tests
 
