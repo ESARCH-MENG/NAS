@@ -536,16 +536,43 @@ class NasToolFileOperationTests(unittest.TestCase):
         finally:
             window.destroy()
 
-    def test_image_capture_opens_app_and_bank_a(self) -> None:
+    def test_image_capture_sets_bank_a_as_import_destination(self) -> None:
         with patch("nas_tool.sys.platform", "darwin"), patch(
             "nas_tool.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, "", ""),
         ) as run:
             open_image_capture(self.bank_a)
             self.assertEqual(run.call_args_list[0].args[0],
-                             ["/usr/bin/open", str(self.bank_a.resolve())])
-            self.assertEqual(run.call_args_list[1].args[0],
                              ["/usr/bin/open", "-b", "com.apple.Image_Capture"])
+            automation = run.call_args_list[1]
+            self.assertEqual(automation.args[0][:2], ["/usr/bin/osascript", "-e"])
+            self.assertEqual(automation.args[0][3:], [str(self.bank_a.resolve())])
+            self.assertIn("on run argv", automation.args[0][2])
+            self.assertIn("keystroke destinationPath", automation.args[0][2])
+            self.assertEqual(automation.kwargs["timeout"], 45)
+
+    def test_image_capture_reports_destination_errors(self) -> None:
+        for failure in (
+            subprocess.CompletedProcess([], 1, "", "Accessibility permission required"),
+            subprocess.TimeoutExpired("osascript", 45),
+        ):
+            with self.subTest(failure=failure), patch("nas_tool.sys.platform", "darwin"), patch(
+                "nas_tool.subprocess.run",
+                side_effect=[subprocess.CompletedProcess([], 0, "", ""), failure],
+            ):
+                with self.assertRaises(OSError):
+                    open_image_capture(self.bank_a)
+
+    def test_image_capture_passes_special_paths_as_arguments(self) -> None:
+        bank = self.base / "photos 'quoted'"
+        bank.mkdir()
+        with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as run:
+            open_image_capture(bank)
+        self.assertEqual(run.call_args_list[-1].args[0][-1], str(bank.resolve()))
+        self.assertNotIn(str(bank.resolve()), run.call_args_list[-1].args[0][2])
 
     def test_image_capture_rejects_missing_folder_and_reports_launch_errors(self) -> None:
         with patch("nas_tool.sys.platform", "darwin"), patch(
@@ -557,6 +584,15 @@ class NasToolFileOperationTests(unittest.TestCase):
             run.assert_not_called()
             with self.assertRaisesRegex(OSError, "App unavailable"):
                 open_image_capture(self.bank_a)
+            self.assertEqual(run.call_count, 1)
+
+    def test_image_capture_rejects_non_macos(self) -> None:
+        with patch("nas_tool.sys.platform", "win32"), patch(
+            "nas_tool.subprocess.run"
+        ) as run:
+            with self.assertRaisesRegex(ValueError, "macOS only"):
+                open_image_capture(self.bank_a)
+        run.assert_not_called()
 
     def test_stop_image_capture_quits_the_macos_app(self) -> None:
         with patch("nas_tool.sys.platform", "darwin"), patch(
@@ -584,8 +620,11 @@ class NasToolFileOperationTests(unittest.TestCase):
                 "nas_tool.messagebox.showinfo"
             ) as info, patch("nas_tool.upload_to_bank_a") as upload:
                 app._upload()
+                wait_for_task(window, app)
                 capture.assert_called_once_with(self.bank_a)
                 info.assert_called_once()
+                self.assertIn(str(self.bank_a.resolve()), info.call_args.args[1])
+                self.assertNotIn("Other...", info.call_args.args[1])
                 upload.assert_not_called()
             self.assertIsNone(app.upload_folder)
             self.assertTrue(app._image_capture_active)
@@ -602,6 +641,7 @@ class NasToolFileOperationTests(unittest.TestCase):
                 "nas_tool.messagebox.showinfo"
             ):
                 app._upload()
+                wait_for_task(window, app)
             app._task_thread = Mock()
             app._task_thread.is_alive.return_value = True
 
@@ -616,6 +656,44 @@ class NasToolFileOperationTests(unittest.TestCase):
             stop.assert_called_once_with()
             self.assertFalse(app._image_capture_active)
             self.assertTrue(window.winfo_exists())
+        finally:
+            window.destroy()
+
+    def test_upload_reports_image_capture_setup_failure(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths["A"] = self.bank_a
+            with patch(
+                "nas_tool.open_image_capture", side_effect=OSError("Destination not set")
+            ), patch("nas_tool.messagebox.showinfo") as info, patch(
+                "nas_tool.messagebox.showerror"
+            ) as error:
+                app._upload()
+                wait_for_task(window, app)
+            info.assert_not_called()
+            error.assert_called_once_with("Download Failed", "Destination not set")
+            self.assertFalse(app._image_capture_active)
+        finally:
+            window.destroy()
+
+    def test_stop_during_image_capture_setup_does_not_report_success(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths["A"] = self.bank_a
+
+            def cancel_setup(_bank_a: Path) -> None:
+                app._cancel_event.set()
+
+            with patch("nas_tool.open_image_capture", side_effect=cancel_setup), patch(
+                "nas_tool.stop_image_capture"
+            ) as stop, patch("nas_tool.messagebox.showinfo") as info:
+                app._upload()
+                wait_for_task(window, app)
+            stop.assert_called_once_with()
+            info.assert_not_called()
+            self.assertFalse(app._image_capture_active)
         finally:
             window.destroy()
 

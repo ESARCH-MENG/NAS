@@ -78,7 +78,10 @@ Its files and subfolders are copied into Bank-A. Existing same-path files are
 skipped and are not overwritten.
 
 On macOS, clicking DOWNLOAD without a source folder opens Image Capture and
-Bank-A. In Image Capture, choose Bank-A as the import destination.
+sets its import destination to Bank-A. Connect and select your device first.
+Allow Accessibility and Automation access when macOS requests it. If setup
+fails, no import is started; select the device and click DOWNLOAD again.
+Choose the photos and start importing in Image Capture yourself.
 
 5. Delete
 DELETE SELECTED permanently deletes the selected comparison results from their
@@ -759,6 +762,97 @@ def upload_to_bank_a(
     return copied, skipped
 
 
+IMAGE_CAPTURE_DESTINATION_SCRIPT = """
+on run argv
+    set destinationPath to item 1 of argv
+    set destinationName to name of (info for (POSIX file destinationPath))
+    tell application "System Events"
+        if not UI elements enabled then
+            error "Allow NAS Tool (or its Python host) in System Settings > Privacy & Security > Accessibility."
+        end if
+        repeat 100 times
+            if exists (first application process whose bundle identifier is "com.apple.Image_Capture") then exit repeat
+            delay 0.1
+        end repeat
+        if not (exists (first application process whose bundle identifier is "com.apple.Image_Capture")) then
+            error "Image Capture did not start."
+        end if
+        tell (first application process whose bundle identifier is "com.apple.Image_Capture")
+            set frontmost to true
+            repeat 100 times
+                if exists window 1 then exit repeat
+                delay 0.1
+            end repeat
+            if not (exists window 1) then error "Image Capture has no import window."
+            if exists sheet 1 of window 1 then
+                error "Close the open Image Capture dialog, then click Download in NAS Tool again."
+            end if
+            set destinationPopup to missing value
+            repeat 50 times
+                set windowElements to entire contents of window 1
+                repeat with candidate in windowElements
+                    if class of candidate is pop up button then
+                        if enabled of candidate then
+                            click candidate
+                            delay 0.1
+                            if exists menu 1 of candidate then
+                                set choices to menu items of menu 1 of candidate
+                                repeat with otherChoice in choices
+                                    set choiceName to name of otherChoice
+                                    if choiceName ends with "..." or choiceName ends with (character id 8230) then
+                                        click otherChoice
+                                        set destinationPopup to contents of candidate
+                                        exit repeat
+                                    end if
+                                end repeat
+                            end if
+                            if destinationPopup is not missing value then exit repeat
+                            key code 53
+                        end if
+                    end if
+                end repeat
+                if destinationPopup is not missing value then exit repeat
+                delay 0.1
+            end repeat
+            if destinationPopup is missing value then
+                error "Cannot find Import To > Other in Image Capture. Connect and select your device, then click Download in NAS Tool again."
+            end if
+            repeat 50 times
+                if exists sheet 1 of window 1 then exit repeat
+                delay 0.1
+            end repeat
+            if not (exists sheet 1 of window 1) then error "Image Capture did not open the destination folder chooser."
+            keystroke "g" using {command down, shift down}
+            repeat 50 times
+                if exists sheet 1 of sheet 1 of window 1 then exit repeat
+                delay 0.1
+            end repeat
+            if not (exists sheet 1 of sheet 1 of window 1) then error "Cannot open Go to Folder in Image Capture."
+            keystroke "a" using command down
+            keystroke destinationPath
+            key code 36
+            repeat 50 times
+                if not (exists sheet 1 of sheet 1 of window 1) then exit repeat
+                delay 0.1
+            end repeat
+            if exists sheet 1 of sheet 1 of window 1 then error "Cannot navigate to the Bank-A folder."
+            delay 0.3
+            key code 36
+            repeat 50 times
+                if not (exists sheet 1 of window 1) then exit repeat
+                delay 0.1
+            end repeat
+            if exists sheet 1 of window 1 then error "Cannot confirm the Bank-A destination folder."
+            set selectedDestination to value of destinationPopup
+            if selectedDestination is not destinationName and selectedDestination is not destinationPath then
+                error "Image Capture did not confirm Bank-A as its import destination."
+            end if
+        end tell
+    end tell
+end run
+"""
+
+
 def open_image_capture(bank_a: Path) -> None:
     if sys.platform != "darwin":
         raise ValueError("Image Capture import is available on macOS only.")
@@ -766,16 +860,23 @@ def open_image_capture(bank_a: Path) -> None:
     if not bank_a.is_dir():
         raise ValueError(f"Bank-A folder does not exist or cannot be accessed: {bank_a}")
     for arguments in (
-        ["/usr/bin/open", str(bank_a)],
         ["/usr/bin/open", "-b", "com.apple.Image_Capture"],
+        ["/usr/bin/osascript", "-e", IMAGE_CAPTURE_DESTINATION_SCRIPT, str(bank_a)],
     ):
-        result = subprocess.run(
-            arguments, capture_output=True, text=True, check=False
-        )
+        try:
+            result = subprocess.run(
+                arguments, capture_output=True, text=True, check=False, timeout=45
+            )
+        except subprocess.TimeoutExpired as error:
+            raise OSError(
+                "Timed out setting the Image Capture destination. Check macOS "
+                "Accessibility/Automation permissions, select your device in "
+                "Image Capture, and click Download in NAS Tool again."
+            ) from error
         if result.returncode:
             raise OSError(
                 result.stderr.strip() or result.stdout.strip()
-                or f"Unable to open Image Capture or Bank-A (exit {result.returncode})."
+                or f"Unable to set Image Capture destination to Bank-A (exit {result.returncode})."
             )
 
 
@@ -1136,18 +1237,33 @@ class NasTool:
             if bank_a is None:
                 raise ValueError("Select a Bank-A folder first.")
             if self.upload_folder is None:
-                open_image_capture(bank_a)
-                self._image_capture_active = True
-                messagebox.showinfo(
-                    "Import with Image Capture",
-                    "Bank-A and Image Capture have been opened.\n\n"
-                    "1. Connect and select your camera or iPhone.\n"
-                    "2. In Image Capture, choose Import To > Other...\n"
-                    f"3. Select Bank-A:\n{bank_a.resolve()}\n"
-                    "4. Choose the photos and click Download / Import.\n\n"
-                    "Click Compare after the import finishes to refresh the results.\n"
-                    "Image Capture controls duplicate handling; the folder upload "
-                    "skip-existing policy does not apply here.",
+                def configure_destination(cancelled: CancelCheck) -> object:
+                    _raise_if_cancelled(cancelled)
+                    open_image_capture(bank_a)
+                    if cancelled():
+                        stop_image_capture()
+                        raise OperationCancelled()
+                    return None
+
+                def destination_configured(_result: object) -> None:
+                    self._image_capture_active = True
+                    messagebox.showinfo(
+                        "Import with Image Capture",
+                        f"Image Capture's import destination is set to Bank-A:\n"
+                        f"{bank_a.resolve()}\n\n"
+                        "Choose the photos and click Download / Import in Image Capture.\n"
+                        "If you switch devices, click Download in NAS Tool again "
+                        "to set that device's destination.\n\n"
+                        "Click Compare after the import finishes to refresh the results.\n"
+                        "Image Capture controls duplicate handling; the folder upload "
+                        "skip-existing policy does not apply here.",
+                    )
+
+                self._start_task(
+                    configure_destination,
+                    destination_configured,
+                    error_title="Download Failed",
+                    clear_on_error=True,
                 )
                 return
         except (OSError, ValueError) as error:

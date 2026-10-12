@@ -50,10 +50,16 @@ are deleted. The selected source path is displayed beneath the upload controls.
 There is no bottom status bar; errors and warnings are shown in dialogs.
 
 If no upload folder is selected, **Download** on macOS opens the system
-**Image Capture** app and Bank-A in Finder instead. Connect/select your device,
-choose **Import To > Other...**, and select Bank-A before importing photos.
-The tool displays these instructions but does not automatically set the import
-destination or start importing. Image Capture handles duplicates independently
+**Image Capture** app and sets **Import To > Other...** to Bank-A using macOS
+UI automation. Connect and select your device first. Grant **Accessibility**
+access to NAS Tool (or its Python/terminal host) in **System Settings > Privacy &
+Security**, and allow **Automation** access to System Events when prompted.
+Missing permissions, an unselected device, or an unconfirmed destination are
+reported as errors, not as a successful setup. Select your device and click
+**Download** in NAS Tool again after resolving the error. The destination is
+device-specific; repeat this step after switching devices.
+Choose the photos and start importing in Image Capture yourself; NAS Tool does
+not start an import automatically. Image Capture handles duplicates independently
 of the folder-upload skip policy. Click **Compare** after the import completes.
 Bank-A must be selected and accessible. This fallback is unavailable on Windows.
 
@@ -124,3 +130,5 @@ python3 -m unittest -v test_nas_tool
 
 The GUI tests require a desktop session. Launchd registration tests use mocks;
 actual launchd registration and closed-window execution need macOS validation.
+Image Capture destination tests mock macOS commands. Actual destination setup
+also needs validation on macOS with a connected device and Accessibility access.
