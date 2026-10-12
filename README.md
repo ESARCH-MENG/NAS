@@ -91,6 +91,19 @@ ICNS encoder. Use this ICNS as the icon when building the macOS app bundle.
 The current source is low-resolution; a 1024px original will produce sharper
 large icons.
 
+## Build macOS DMG
+
+On macOS, install the project dependencies and run:
+
+```sh
+python3 -m pip install -r requirements.txt
+python3 packaging/create_dmg.py
+```
+
+The script builds `NAS Tool.app` and creates `~/Desktop/NAS-Tool.dmg`. If
+PyInstaller is not installed, it installs it into a temporary build environment.
+Use `--force` to replace an existing DMG.
+
 ## Tests
 
 ```sh
