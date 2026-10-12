@@ -25,6 +25,7 @@ from PIL import Image, ImageOps, ImageTk, UnidentifiedImageError
 
 CHUNK_SIZE = 1024 * 1024
 TEXT_PREVIEW_LIMIT = 12_000
+APP_VERSION = "1.0"
 BG = "#ffffff"
 PANEL = "#fbfaf7"
 PANEL_ALT = "#f1eee8"
@@ -51,6 +52,21 @@ TEXT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
+
+
+def get_app_version() -> str:
+    if getattr(sys, "frozen", False):
+        info_plist = Path(sys.executable).parent.parent / "Info.plist"
+        try:
+            metadata = plistlib.loads(info_plist.read_bytes())
+        except (OSError, plistlib.InvalidFileException):
+            pass
+        else:
+            version = metadata.get("CFBundleShortVersionString")
+            if isinstance(version, str) and version.strip():
+                return version.strip()
+    return APP_VERSION
+
 
 HELP_TEXT = """NAS Tool User Guide
 
@@ -1005,7 +1021,7 @@ class NasTool:
 
     def _build_ui(self) -> None:
         self.root.configure(background=BG)
-        self.root.title("NAS Tool")
+        self.root.title(f"NAS Tool v{get_app_version()}")
         self.root.geometry("1080x780")
         self.root.minsize(920, 680)
         self._build_menu()

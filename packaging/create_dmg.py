@@ -78,6 +78,16 @@ def _set_app_version(app: Path, version: str) -> None:
     info_plist.write_bytes(plistlib.dumps(metadata, fmt=plist_format))
 
 
+def _versioned_output_path(output: Path, version: str) -> Path:
+    output = output.expanduser()
+    suffix = output.suffix or ".dmg"
+    stem = output.stem if output.suffix else output.name
+    version_suffix = f"-{version}"
+    if not stem.endswith(version_suffix):
+        stem += version_suffix
+    return output.with_name(f"{stem}{suffix}")
+
+
 def build_dmg(output: Path, replace_existing: bool = False) -> None:
     if sys.platform != "darwin":
         raise RuntimeError("DMG creation is supported on macOS only.")
@@ -90,13 +100,13 @@ def build_dmg(output: Path, replace_existing: bool = False) -> None:
     if not APP_ICON.is_file():
         raise RuntimeError(f"App icon not found: {APP_ICON}")
 
-    output = output.expanduser().absolute()
+    app_version = _ask_app_version()
+    output = _versioned_output_path(output, app_version).absolute()
     if output.exists() and not replace_existing:
         raise FileExistsError(f"{output} already exists; pass --force to replace it.")
     if output.is_dir():
         raise IsADirectoryError(f"DMG output path is a directory: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    app_version = _ask_app_version()
 
     temporary_image: Path | None = None
     try:
@@ -134,6 +144,7 @@ def build_dmg(output: Path, replace_existing: bool = False) -> None:
             app = dist / f"{APP_NAME}.app"
             if not app.is_dir():
                 raise RuntimeError(f"PyInstaller did not create the app bundle: {app}")
+            _set_app_version(app, app_version)
 
             staging = build_root / "staging"
             staging.mkdir()
@@ -174,7 +185,7 @@ def main() -> None:
         "--output",
         type=Path,
         default=Path.home() / "Desktop" / DMG_NAME,
-        help=f"Output path (default: ~/Desktop/{DMG_NAME})",
+        help=f"Output path (version is appended; default: ~/Desktop/{DMG_NAME})",
     )
     parser.add_argument(
         "--force",
