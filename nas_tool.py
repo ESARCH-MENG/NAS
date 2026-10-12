@@ -942,6 +942,29 @@ def open_accessibility_settings() -> None:
         )
 
 
+def open_automation_settings() -> None:
+    if sys.platform != "darwin":
+        raise ValueError("Automation settings are available on macOS only.")
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/open",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OSError("Timed out opening macOS Automation privacy settings.") from error
+    if result.returncode:
+        raise OSError(
+            result.stderr.strip() or result.stdout.strip()
+            or "Unable to open macOS Automation privacy settings."
+        )
+
+
 class ToggleSwitch(tk.Canvas):
     def __init__(
         self,
@@ -1250,6 +1273,23 @@ class NasTool:
             if self._task_clear_on_error:
                 self._clear_results()
             error_message = str(payload)
+            if (
+                "-1743" in error_message
+                or "Not authorized to send Apple events to System Events" in error_message
+            ):
+                error_message += (
+                    "\n\nOpen System Settings > Privacy & Security > Automation "
+                    "and enable NAS Tool for System Events. This list has no "
+                    "Add button; macOS lists an app after it requests access. "
+                    "NAS Tool requests this access when you click Download. "
+                    "Launch the newly built NAS Tool.app, click Download, and "
+                    "allow the macOS Automation prompt. This permission is "
+                    "separate from Accessibility."
+                )
+                try:
+                    open_automation_settings()
+                except (OSError, ValueError) as error:
+                    error_message += f"\n\nCould not open settings automatically: {error}"
             if "Allow NAS Tool (or its Python host)" in error_message:
                 error_message += (
                     "\n\nOpen System Settings > Privacy & Security > Accessibility "

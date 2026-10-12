@@ -72,6 +72,9 @@ def _set_app_version(app: Path, version: str) -> None:
     metadata = plistlib.loads(contents)
     metadata["CFBundleShortVersionString"] = version
     metadata["CFBundleVersion"] = version
+    metadata["NSAppleEventsUsageDescription"] = (
+        "NAS Tool uses Apple Events to configure Image Capture's import destination."
+    )
     plist_format = (
         plistlib.FMT_BINARY if contents.startswith(b"bplist00") else plistlib.FMT_XML
     )

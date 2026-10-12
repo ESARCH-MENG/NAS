@@ -63,6 +63,12 @@ the macOS permission prompt if it names a different application. If it is not
 listed, use **+** to add that application, unlock settings if necessary, and
 enable its switch. Quit and reopen the launching application and NAS Tool
 before retrying. Automation prompts may name both System Events and Image Capture.
+If macOS reports **Not authorized to send Apple events to System Events (-1743)**,
+NAS Tool opens **System Settings > Privacy & Security > Automation**; enable
+NAS Tool for **System Events**. macOS has no Add button on this page; apps
+appear after they request access. NAS Tool requests access when you click
+**Download**; launch the newly built app and allow the macOS prompt. This
+permission is separate from Accessibility.
 Missing permissions, an unselected device, or an unconfirmed destination are
 reported as errors, not as a successful setup. Select your device and click
 **Download** in NAS Tool again after resolving the error. The destination is

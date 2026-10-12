@@ -23,6 +23,7 @@ from nas_tool import (
     delete_selected_files,
     open_image_capture,
     open_accessibility_settings,
+    open_automation_settings,
     stop_image_capture,
     sync_a_to_b,
     upload_to_bank_a,
@@ -715,6 +716,23 @@ class NasToolFileOperationTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     open_accessibility_settings()
 
+    def test_automation_settings_opens_automation_privacy_pane(self) -> None:
+        with patch("nas_tool.sys.platform", "darwin"), patch(
+            "nas_tool.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as run:
+            open_automation_settings()
+        run.assert_called_once_with(
+            [
+                "/usr/bin/open",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+
     def test_image_capture_permission_error_preserved_when_settings_fail(self) -> None:
         window = tk.Tk()
         try:
@@ -732,6 +750,31 @@ class NasToolFileOperationTests(unittest.TestCase):
             self.assertIn("Allow NAS Tool (or its Python host)", error.call_args.args[1])
             self.assertIn("Settings unavailable", error.call_args.args[1])
             self.assertFalse(app._image_capture_active)
+        finally:
+            window.destroy()
+
+    def test_automation_permission_error_explains_how_to_grant_access(self) -> None:
+        window = tk.Tk()
+        try:
+            app = NasTool(window, self.base / "settings.json")
+            app.bank_paths["A"] = self.bank_a
+            with patch(
+                "nas_tool.open_image_capture",
+                side_effect=OSError(
+                    "Not authorized to send Apple events to System Events. (-1743)"
+                ),
+            ), patch("nas_tool.open_automation_settings") as open_settings, patch(
+                "nas_tool.messagebox.showerror"
+            ) as error:
+                app._upload()
+                wait_for_task(window, app)
+            open_settings.assert_called_once_with()
+            message = error.call_args.args[1]
+            self.assertIn("Privacy & Security > Automation", message)
+            self.assertIn("enable NAS Tool for System Events", message)
+            self.assertIn("no Add button", message)
+            self.assertIn("NAS Tool requests this access when you click Download", message)
+            self.assertIn("separate from Accessibility", message)
         finally:
             window.destroy()
 
