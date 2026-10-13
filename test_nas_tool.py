@@ -976,11 +976,17 @@ class PackagingTests(unittest.TestCase):
 
     def test_app_is_signed_and_verified_after_metadata_changes(self) -> None:
         app = Path("/tmp/NAS Tool.app")
-        with patch("packaging.create_dmg.shutil.which", return_value="/usr/bin/codesign"), patch(
+        with patch(
+            "packaging.create_dmg._find_codesigning_identity",
+            return_value="NAS Tool Development",
+        ), patch(
+            "packaging.create_dmg.shutil.which", return_value="/usr/bin/codesign"
+        ), patch(
             "packaging.create_dmg.subprocess.run"
         ) as run:
-            _sign_app(app)
+            identity = _sign_app(app)
 
+        self.assertEqual(identity, "NAS Tool Development")
         self.assertEqual(
             run.call_args_list,
             [
@@ -990,11 +996,9 @@ class PackagingTests(unittest.TestCase):
                         "--force",
                         "--deep",
                         "--sign",
-                        "-",
+                        "NAS Tool Development",
                         "--identifier",
                         "com.marvel.nas-tool",
-                        "--requirements",
-                        '=designated => identifier "com.marvel.nas-tool"',
                         str(app),
                     ],
                     check=True,
@@ -1004,6 +1008,39 @@ class PackagingTests(unittest.TestCase):
                     check=True,
                 ),
             ],
+        )
+
+    def test_sign_app_creates_identity_when_missing(self) -> None:
+        app = Path("/tmp/NAS Tool.app")
+        with patch(
+            "packaging.create_dmg._find_codesigning_identity", return_value=None
+        ), patch(
+            "packaging.create_dmg._create_development_identity",
+            return_value="NAS Tool Development",
+        ) as create_identity, patch(
+            "packaging.create_dmg.shutil.which", return_value="/usr/bin/codesign"
+        ), patch(
+            "packaging.create_dmg.subprocess.run"
+        ) as run:
+            identity = _sign_app(app)
+
+        create_identity.assert_called_once_with()
+        self.assertEqual(identity, "NAS Tool Development")
+        self.assertEqual(
+            run.call_args_list[0],
+            call(
+                [
+                    "/usr/bin/codesign",
+                    "--force",
+                    "--deep",
+                    "--sign",
+                    "NAS Tool Development",
+                    "--identifier",
+                    "com.marvel.nas-tool",
+                    str(app),
+                ],
+                check=True,
+            ),
         )
 
 

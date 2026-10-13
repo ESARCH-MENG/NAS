@@ -141,9 +141,20 @@ large icons.
 ## Build macOS DMG
 
 Run `python3 packaging/create_dmg.py` on macOS to build a fresh app from the
-current `nas_tool.py` and package it. The build applies the final bundle metadata
-and re-signs/verifies the `.app` afterward; distribute the newly created DMG
-when application code or macOS privacy metadata changes.
+current `nas_tool.py` and package it. Pass `--version 1.2` to skip the
+interactive version prompt. The build applies the final bundle metadata and
+re-signs/verifies the `.app` afterward; distribute the newly created DMG when
+application code or macOS privacy metadata changes.
+
+Signing uses a persistent self-signed certificate, **NAS Tool Development**,
+stored in the login keychain. The first build creates it automatically. The
+certificate anchors the app's designated requirement, so macOS **Automation**
+and **Accessibility** permissions granted to one build stay valid for every
+later rebuild; ad-hoc signatures change on each build and lose those
+permissions. When replacing an installation built before this certificate
+existed, approve the Automation and Accessibility prompts once more, remove any
+stale NAS Tool entry under Privacy & Security > Accessibility, and run
+`tccutil reset AppleEvents com.marvel.nas-tool` to clear an old denial.
 
 ## Tests
 

@@ -849,20 +849,57 @@ set destinationName to name of (info for (POSIX file destinationPath))
                 delay 0.1
             end repeat
             if not (exists sheet 1 of sheet 1 of window 1) then error "Cannot open Go to Folder in Image Capture."
-            delay 0.3
-            keystroke "a" using command down
-            keystroke destinationPath
-            key code 36
-            repeat 50 times
+            repeat 3 times
+                set goToSheet to sheet 1 of sheet 1 of window 1
+                set goToField to missing value
+                try
+                    set goToField to text field 1 of goToSheet
+                end try
+                if goToField is missing value then
+                    try
+                        set goToField to combo box 1 of goToSheet
+                    end try
+                end if
+                if goToField is not missing value then
+                    try
+                        set focused of goToField to true
+                    end try
+                    delay 0.2
+                    try
+                        set value of goToField to destinationPath
+                    end try
+                    set typedPath to missing value
+                    try
+                        set typedPath to value of goToField
+                    end try
+                    if typedPath is not destinationPath then
+                        keystroke "a" using command down
+                        keystroke destinationPath
+                    end if
+                else
+                    keystroke "a" using command down
+                    keystroke destinationPath
+                end if
+                delay 0.2
+                key code 36
+                repeat 200 times
+                    if not (exists sheet 1 of sheet 1 of window 1) then exit repeat
+                    delay 0.1
+                end repeat
                 if not (exists sheet 1 of sheet 1 of window 1) then exit repeat
-                delay 0.1
+                delay 0.5
             end repeat
-            if exists sheet 1 of sheet 1 of window 1 then error "Cannot navigate to the Bank-A folder."
-            delay 0.3
-            key code 36
-            repeat 50 times
+            if exists sheet 1 of sheet 1 of window 1 then
+                error "Cannot navigate to the Bank-A folder. Confirm the folder is reachable: " & destinationPath
+            end if
+            repeat 3 times
+                key code 36
+                repeat 200 times
+                    if not (exists sheet 1 of window 1) then exit repeat
+                    delay 0.1
+                end repeat
                 if not (exists sheet 1 of window 1) then exit repeat
-                delay 0.1
+                delay 0.5
             end repeat
             if exists sheet 1 of window 1 then error "Cannot confirm the Bank-A destination folder."
             set selectedDestination to value of destinationPopup
