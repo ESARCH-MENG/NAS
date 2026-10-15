@@ -54,8 +54,8 @@ If no upload folder is selected, **Download** on macOS opens the system
 UI automation executed inside NAS Tool. Connect and select your device first. Grant **Accessibility**
 access to NAS Tool (or its Python/terminal host) in **System Settings > Privacy &
 Security**, and allow **Automation** access to System Events when prompted.
-Use **Privacy & Security > Accessibility** (Chinese: **隐私与安全性 > 辅助功能**),
-not the separate top-level Accessibility settings page. NAS Tool opens the
+Use **Privacy & Security > Accessibility**, not the separate top-level
+Accessibility settings page. NAS Tool opens the
 privacy permission list when this permission is missing. Enable the launching
 application: **NAS Tool** for an app bundle, **Terminal/iTerm** for a terminal
 launch, or **Visual Studio Code** for a VS Code launch; follow the host name in
